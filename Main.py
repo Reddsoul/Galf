@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, ttk
 import json
 import os
 from statistics import mean
@@ -25,39 +25,18 @@ class GolfApp:
         self.courses = load_json(COURSES_FILE)
         self.rounds = load_json(ROUNDS_FILE)
 
-        # UI Elements
+        # Main UI
         self.main_frame = tk.Frame(root)
-        self.main_frame.pack()
+        self.main_frame.pack(padx=20, pady=20)
 
-        self.round_frame = tk.LabelFrame(self.main_frame, text="Add Round")
-        self.info_frame = tk.LabelFrame(self.main_frame, text="Summary")
+        tk.Button(self.main_frame, text="Add New Course", command=self.open_course_window, width=30).pack(pady=10)
+        tk.Button(self.main_frame, text="Log a Round", command=self.open_log_round_page, width=30).pack(pady=10)
 
-        self.round_frame.grid(row=0, column=0, padx=10, pady=10)
-        self.info_frame.grid(row=0, column=1, padx=10, pady=10)
-
-        self.create_round_ui()
+        self.info_frame = tk.LabelFrame(self.main_frame, text="Summary", padx=10, pady=10)
+        self.info_frame.pack(pady=20)
         self.create_info_ui()
 
-        tk.Button(self.main_frame, text="Add New Course", command=self.open_course_window).grid(row=1, column=0, columnspan=2, pady=10)
-
         self.refresh_summary()
-
-    def create_round_ui(self):
-        tk.Label(self.round_frame, text="Course Name").grid(row=0, column=0)
-        tk.Label(self.round_frame, text="Score").grid(row=1, column=0)
-        tk.Label(self.round_frame, text="Holes (must be 18)").grid(row=2, column=0)
-
-        self.round_course_name = tk.Entry(self.round_frame)
-        self.round_score = tk.Entry(self.round_frame)
-        self.round_holes = tk.Entry(self.round_frame)
-        self.is_serious = tk.BooleanVar()
-        tk.Checkbutton(self.round_frame, text="Serious Round", variable=self.is_serious).grid(row=3, columnspan=2)
-
-        self.round_course_name.grid(row=0, column=1)
-        self.round_score.grid(row=1, column=1)
-        self.round_holes.grid(row=2, column=1)
-
-        tk.Button(self.round_frame, text="Save Round", command=self.save_round).grid(row=4, columnspan=2)
 
     def create_info_ui(self):
         self.handicap_label = tk.Label(self.info_frame, text="Handicap Index: ")
@@ -67,6 +46,110 @@ class GolfApp:
         self.handicap_label.pack()
         self.best_round_label.pack()
         self.total_rounds_label.pack()
+
+    def open_log_round_page(self):
+        self.log_window = tk.Toplevel(self.root)
+        self.log_window.title("Log a Round")
+
+        tk.Label(self.log_window, text="Select Course").grid(row=0, column=0)
+        self.course_names = [c["name"] for c in self.courses]
+        self.course_var = tk.StringVar()
+        self.course_menu = ttk.Combobox(self.log_window, textvariable=self.course_var, values=self.course_names, state='readonly')
+        self.course_menu.grid(row=0, column=1)
+
+        self.is_serious_var = tk.BooleanVar()
+        tk.Checkbutton(self.log_window, text="Serious Round", variable=self.is_serious_var).grid(row=1, columnspan=2)
+
+        tk.Label(self.log_window, text="Notes").grid(row=2, column=0)
+        self.notes_entry = tk.Entry(self.log_window, width=40)
+        self.notes_entry.grid(row=2, column=1)
+
+        tk.Button(self.log_window, text="Next", command=self.start_round_input).grid(row=3, columnspan=2, pady=10)
+
+    def start_round_input(self):
+        course_name = self.course_var.get()
+        if not course_name:
+            messagebox.showerror("Error", "Please select a course.")
+            return
+
+        self.selected_course = next((c for c in self.courses if c["name"] == course_name), None)
+        self.is_serious = self.is_serious_var.get()
+        self.notes = self.notes_entry.get()
+        self.hole_scores = []
+
+        for widget in self.log_window.winfo_children():
+            widget.destroy()
+
+        tk.Label(self.log_window, text=f"Scoring for {self.selected_course['name']} ({len(self.selected_course['pars'])} Holes)").grid(row=0, column=0, columnspan=3)
+
+        self.score_entries = []
+        for i in range(len(self.selected_course['pars'])):
+            tk.Label(self.log_window, text=f"Hole {i+1}").grid(row=i+1, column=0)
+            e = tk.Entry(self.log_window)
+            e.grid(row=i+1, column=1)
+            self.score_entries.append(e)
+            if not self.is_serious:
+                tk.Label(self.log_window, text='(Enter number or "skip")').grid(row=i+1, column=2)
+
+        tk.Button(self.log_window, text="Submit Round", command=self.submit_round).grid(row=len(self.selected_course['pars'])+1, columnspan=3, pady=10)
+
+    def submit_round(self):
+        scores = []
+        for e in self.score_entries:
+            val = e.get().strip()
+            if self.is_serious:
+                try:
+                    scores.append(int(val))
+                except:
+                    messagebox.showerror("Error", "All scores must be numbers for serious rounds.")
+                    return
+            else:
+                if val.lower() == "skip":
+                    scores.append(None)
+                else:
+                    try:
+                        scores.append(int(val))
+                    except:
+                        messagebox.showerror("Error", "Enter a number or 'skip' for non-serious rounds.")
+                        return
+
+        total = sum([s for s in scores if s is not None])
+
+        round_data = {
+            "course_name": self.selected_course["name"],
+            "scores": scores,
+            "is_serious": self.is_serious,
+            "notes": self.notes,
+            "holes_played": len(scores),
+            "total_score": total
+        }
+
+        self.rounds.append(round_data)
+        save_json(ROUNDS_FILE, self.rounds)
+
+        self.log_window.destroy()
+        self.show_debrief(round_data)
+
+    def show_debrief(self, round_data):
+        self.debrief_window = tk.Toplevel(self.root)
+        self.debrief_window.title("Round Debrief")
+
+        tk.Label(self.debrief_window, text=f"Course: {round_data['course_name']}").pack()
+        tk.Label(self.debrief_window, text=f"Total Score: {round_data['total_score']}").pack()
+
+        tk.Label(self.debrief_window, text="Notes").pack()
+        self.debrief_notes = tk.Text(self.debrief_window, height=5, width=40)
+        self.debrief_notes.insert(tk.END, round_data["notes"])
+        self.debrief_notes.pack()
+
+        tk.Button(self.debrief_window, text="Update Notes and Close", command=lambda: self.save_debrief(round_data)).pack(pady=10)
+
+    def save_debrief(self, round_data):
+        updated_note = self.debrief_notes.get("1.0", tk.END).strip()
+        round_data["notes"] = updated_note
+        save_json(ROUNDS_FILE, self.rounds)
+        self.debrief_window.destroy()
+        self.refresh_summary()
 
     def open_course_window(self):
         self.course_window = tk.Toplevel(self.root)
@@ -117,7 +200,7 @@ class GolfApp:
         for i in range(self.num_holes):
             tk.Label(self.course_window, text=f"Hole {i+1}").grid(row=i+1, column=0, padx=5, pady=2)
 
-            var = tk.IntVar(value=4)  # Default to 4
+            var = tk.IntVar(value=4)
             self.par_vars.append(var)
 
             for j, val in enumerate([3, 4, 5]):
@@ -145,35 +228,6 @@ class GolfApp:
         self.course_window.destroy()
         messagebox.showinfo("Success", f"Saved course: {self.course_name}")
 
-    def save_round(self):
-        try:
-            name = self.round_course_name.get()
-            score = int(self.round_score.get())
-            holes = int(self.round_holes.get())
-            serious = self.is_serious.get()
-
-            if holes != 18:
-                messagebox.showerror("Error", "Only 18-hole rounds allowed for handicap.")
-                return
-
-            if not any(c["name"] == name for c in self.courses):
-                messagebox.showerror("Error", "Course not found. Add it first.")
-                return
-
-            self.rounds.append({
-                "course_name": name,
-                "score": score,
-                "holes_played": holes,
-                "is_serious": serious
-            })
-
-            save_json(ROUNDS_FILE, self.rounds)
-            messagebox.showinfo("Saved", "Round recorded.")
-            self.refresh_summary()
-
-        except ValueError:
-            messagebox.showerror("Error", "Invalid input. Score and holes must be integers.")
-
     def refresh_summary(self):
         self.courses = load_json(COURSES_FILE)
         self.rounds = load_json(ROUNDS_FILE)
@@ -192,7 +246,7 @@ class GolfApp:
                 continue
             course = next((c for c in self.courses if c["name"] == r["course_name"]), None)
             if course:
-                diff = (r["score"] - course["rating"]) * 113 / course["slope"]
+                diff = (r["total_score"] - course["rating"]) * 113 / course["slope"]
                 diffs.append(diff)
 
         if len(diffs) < 5:
@@ -205,10 +259,9 @@ class GolfApp:
         serious_18 = [r for r in self.rounds if r["holes_played"] == 18 and r["is_serious"]]
         if not serious_18:
             return "No serious 18-hole rounds."
-        best = min(serious_18, key=lambda x: x["score"])
-        return f"{best['score']} on {best['course_name']}"
+        best = min(serious_18, key=lambda x: x["total_score"])
+        return f"{best['total_score']} on {best['course_name']}"
 
-# Run the app
 if __name__ == "__main__":
     os.makedirs("data", exist_ok=True)
     root = tk.Tk()
