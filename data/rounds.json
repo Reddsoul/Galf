@@ -178,5 +178,32 @@
     "notes": "",
     "holes_played": 18,
     "total_score": 90
+  },
+  {
+    "course_name": "Rojas",
+    "scores": [
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4
+    ],
+    "is_serious": false,
+    "notes": "Scramble w/ jeremy\ntook 3 mulligans",
+    "holes_played": 18,
+    "total_score": 72
   }
 ]

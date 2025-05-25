@@ -246,15 +246,39 @@ class GolfApp:
                 continue
             course = next((c for c in self.courses if c["name"] == r["course_name"]), None)
             if course:
-                diff = (r["total_score"] - course["rating"]) * 113 / course["slope"]
-                diffs.append(diff)
+                rating = course["rating"]
+                slope = course["slope"]
+                score = r["total_score"]
+                differential = (score - rating) * 113 / slope
+                diffs.append(differential)
 
-        if len(diffs) < 5:
-            return "Need 5+ serious rounds"
+        if len(diffs) < 3:
+            return "Not enough rounds"
+        
+        diffs.sort()
+        num_used = {
+            range(3, 5): 1,
+            range(5, 7): 2,
+            range(7, 9): 3,
+            range(9, 11): 4,
+            range(11, 13): 5,
+            range(13, 15): 6,
+            range(15, 17): 7,
+            range(17, 18): 8,
+            range(18, 19): 9,
+            range(19, 21): 10,
+            range(21, 100): 10  # Use 10 for 20 or more
+        }
+        for key_range in num_used:
+            if len(diffs) in key_range:
+                count = num_used[key_range]
+                break
+        else:
+            count = len(diffs)
 
-        top_diffs = sorted(diffs)[:min(20, len(diffs))]
-        return round(mean(top_diffs) * 0.96, 2)
-
+        avg = mean(diffs[:count])
+        return round(avg * 0.96, 1)
+    
     def get_best_round(self):
         serious_18 = [r for r in self.rounds if r["holes_played"] == 18 and r["is_serious"]]
         if not serious_18:
