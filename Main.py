@@ -54,17 +54,55 @@ class GolfApp:
         tk.Label(self.log_window, text="Select Course").grid(row=0, column=0)
         self.course_names = [c["name"] for c in self.courses]
         self.course_var = tk.StringVar()
-        self.course_menu = ttk.Combobox(self.log_window, textvariable=self.course_var, values=self.course_names, state='readonly')
+        self.course_menu = ttk.Combobox(
+            self.log_window,
+            textvariable=self.course_var,
+            values=self.course_names,
+            state='readonly'
+        )
         self.course_menu.grid(row=0, column=1)
+        self.course_menu.bind("<<ComboboxSelected>>", self.update_course_info)
+
+        # Labels to display course handicap and target score
+        self.course_handicap_label = tk.Label(self.log_window, text="Course Handicap: N/A")
+        self.course_handicap_label.grid(row=1, column=0, columnspan=2, sticky='w', pady=2)
+
+        self.target_score_label = tk.Label(self.log_window, text="Target Score: N/A")
+        self.target_score_label.grid(row=2, column=0, columnspan=2, sticky='w', pady=2)
 
         self.is_serious_var = tk.BooleanVar()
-        tk.Checkbutton(self.log_window, text="Serious Round", variable=self.is_serious_var).grid(row=1, columnspan=2)
+        tk.Checkbutton(
+            self.log_window,
+            text="Serious Round",
+            variable=self.is_serious_var
+        ).grid(row=3, columnspan=2)
 
-        tk.Label(self.log_window, text="Notes").grid(row=2, column=0)
+        tk.Label(self.log_window, text="Notes").grid(row=4, column=0)
         self.notes_entry = tk.Entry(self.log_window, width=40)
-        self.notes_entry.grid(row=2, column=1)
+        self.notes_entry.grid(row=4, column=1)
 
-        tk.Button(self.log_window, text="Next", command=self.start_round_input).grid(row=3, columnspan=2, pady=10)
+        tk.Button(
+            self.log_window,
+            text="Next",
+            command=self.start_round_input
+        ).grid(row=5, columnspan=2, pady=10)
+
+    def update_course_info(self, event =None):
+        course_name = self.course_var.get()
+        selected_course = next((c for c in self.courses if c["name"] == course_name), None)
+        if selected_course:
+            course_handicap = selected_course.get("course_handicap", "N/A")
+            par = sum(selected_course["pars"])
+            if isinstance(course_handicap, (int, float)):
+                target_score = par + round(course_handicap)
+            else:
+                target_score = "N/A"
+
+            self.course_handicap_label.config(text=f"Course Handicap: {course_handicap}")
+            self.target_score_label.config(text=f"Target Score: {target_score}")
+        else:
+            self.course_handicap_label.config(text="Course Handicap: N/A")
+            self.target_score_label.config(text="Target Score: N/A")
 
     def start_round_input(self):
         course_name = self.course_var.get()
@@ -83,8 +121,8 @@ class GolfApp:
         tk.Label(self.log_window, text=f"Scoring for {self.selected_course['name']} ({len(self.selected_course['pars'])} Holes)").grid(row=0, column=0, columnspan=3)
 
         self.score_entries = []
-        for i in range(len(self.selected_course['pars'])):
-            tk.Label(self.log_window, text=f"Hole {i+1}").grid(row=i+1, column=0)
+        for i, par in enumerate(self.selected_course['pars']):
+            tk.Label(self.log_window, text=f"Hole {i+1} (Par {par})").grid(row=i+1, column=0)
             e = tk.Entry(self.log_window)
             e.grid(row=i+1, column=1)
             self.score_entries.append(e)
@@ -209,52 +247,58 @@ class GolfApp:
             self.par_vars.append(var)
 
             for j, val in enumerate([3, 4, 5]):
-                b = tk.Radiobutton(self.course_window, text=str(val), variable=var, value=val)
-                b.grid(row=i+1, column=j+1)
+                tk.Radiobutton(self.course_window, text=str(val), variable=var, value=val).grid(row=i+1, column=j+1)
 
-        tk.Button(self.course_window, text="Save Course", command=self.save_course).grid(row=self.num_holes+1, column=0, columnspan=4, pady=10)
+        tk.Button(self.course_window, text="Save Course", command=self.save_course).grid(row=self.num_holes+1, columnspan=4, pady=10)
 
     def save_course(self):
-        par_list = [var.get() for var in self.par_vars]
+        pars = [var.get() for var in self.par_vars]
+        par_total = sum(pars)
 
-        course = {
+        # Calculate Course Handicap using USGA approximation
+        course_handicap = (self.course_slope / 113) * (self.course_rating - par_total)
+
+        new_course = {
             "name": self.course_name,
             "rating": self.course_rating,
             "slope": self.course_slope,
-            "pars": par_list
+            "pars": pars,
+            "course_handicap": round(course_handicap, 1)
         }
 
-        existing = next((c for c in self.courses if c["name"] == self.course_name), None)
-        if existing:
-            self.courses.remove(existing)
-
-        self.courses.append(course)
+        self.courses.append(new_course)
         save_json(COURSES_FILE, self.courses)
+
         self.course_window.destroy()
-        messagebox.showinfo("Success", f"Saved course: {self.course_name}")
+        self.refresh_summary()
 
     def refresh_summary(self):
-        self.handicap_index = self.calculate_handicap_index()
+        serious_rounds = [r for r in self.rounds if r.get("is_serious") and r.get("total_score") is not None]
+        self.total_rounds_label.config(text=f"Total Rounds: {len(self.rounds)}")
 
-        if isinstance(self.handicap_index, (int, float)):
-            handicap_text = f"Handicap Index: {self.handicap_index:.1f}"
-        else:
-            handicap_text = "Handicap Index: N/A"
+        if serious_rounds:
+            best = min(r["total_score"] for r in serious_rounds)
+            self.best_round_label.config(text=f"Best Round: {best}")
 
-        self.handicap_label.config(text=handicap_text)
+            # Handicap index: average differential of best 8 out of last 20 (simple approximation)
+            differentials = []
+            for r in serious_rounds:
+                course = next((c for c in self.courses if c["name"] == r["course_name"]), None)
+                if course and course["slope"] and course["rating"]:
+                    diff = (r["total_score"] - course["rating"]) * 113 / course["slope"]
+                    differentials.append(diff)
 
-        if self.rounds:
-            serious_rounds = [r for r in self.rounds if r["is_serious"] and r["total_score"] is not None]
-            best = min(serious_rounds, key=lambda r: r["total_score"], default=None)
-            if best:
-                self.best_round_label.config(text=f"Best Round: {best['total_score']} on {best['course_name']}")
+            if len(differentials) >= 3:
+                differentials.sort()
+                top_diffs = differentials[:min(8, len(differentials))]
+                index = round(mean(top_diffs) * 0.96, 1)
+                self.handicap_label.config(text=f"Handicap Index: {index}")
             else:
-                self.best_round_label.config(text="Best Round: N/A")
-            self.total_rounds_label.config(text=f"Total Rounds: {len(self.rounds)}")
+                self.handicap_label.config(text="Handicap Index: N/A (need more rounds)")
         else:
             self.best_round_label.config(text="Best Round: N/A")
-            self.total_rounds_label.config(text="Total Rounds: 0")
-    
+            self.handicap_label.config(text="Handicap Index: N/A")
+            
     def update_course_handicaps(self):
         for course in self.courses:
             par = sum(course["pars"])
