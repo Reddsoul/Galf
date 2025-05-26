@@ -240,45 +240,53 @@ class GolfApp:
         self.total_rounds_label.config(text=f"Total Rounds: {len(self.rounds)}")
 
     def calculate_handicap_index(self):
-        diffs = []
-        for r in self.rounds:
-            if r["holes_played"] != 18 or not r["is_serious"]:
-                continue
-            course = next((c for c in self.courses if c["name"] == r["course_name"]), None)
-            if course:
-                rating = course["rating"]
-                slope = course["slope"]
-                score = r["total_score"]
-                differential = (score - rating) * 113 / slope
-                diffs.append(differential)
+        differentials = []
 
-        if len(diffs) < 3:
-            return "Not enough rounds"
-        
-        diffs.sort()
-        num_used = {
-            range(3, 5): 1,
-            range(5, 7): 2,
-            range(7, 9): 3,
-            range(9, 11): 4,
-            range(11, 13): 5,
-            range(13, 15): 6,
-            range(15, 17): 7,
-            range(17, 18): 8,
-            range(18, 19): 9,
-            range(19, 21): 10,
-            range(21, 100): 10  # Use 10 for 20 or more
-        }
-        for key_range in num_used:
-            if len(diffs) in key_range:
-                count = num_used[key_range]
-                break
+        for rnd in self.rounds:
+            if rnd.get("is_serious") and rnd.get("holes_played") == 18:
+                course = next((c for c in self.courses if c["name"] == rnd["course_name"]), None)
+                if course:
+                    try:
+                        score = rnd["total_score"]
+                        rating = course["rating"]
+                        slope = course["slope"]
+                        differential = round((113 * (score - rating)) / slope, 1)
+                        differentials.append(differential)
+                    except Exception as e:
+                        continue  # skip faulty data
+
+        differentials.sort()
+        num = len(differentials)
+
+        # Table-based logic
+        if num < 3:
+            return "N/A"
+
+        if num == 3:
+            index = differentials[0] - 2.0
+        elif num == 4:
+            index = differentials[0] - 1.0
+        elif num == 5:
+            index = differentials[0]
+        elif num == 6:
+            index = mean(differentials[:2]) - 1.0
+        elif num in [7, 8]:
+            index = mean(differentials[:2])
+        elif 9 <= num <= 11:
+            index = mean(differentials[:3])
+        elif 12 <= num <= 14:
+            index = mean(differentials[:4])
+        elif num in [15, 16]:
+            index = mean(differentials[:5])
+        elif num in [17, 18]:
+            index = mean(differentials[:6])
+        elif num == 19:
+            index = mean(differentials[:7])
         else:
-            count = len(diffs)
+            index = mean(differentials[:8])
 
-        avg = mean(diffs[:count])
-        return round(avg * 0.96, 1)
-    
+        return round(index, 1)
+
     def get_best_round(self):
         serious_18 = [r for r in self.rounds if r["holes_played"] == 18 and r["is_serious"]]
         if not serious_18:

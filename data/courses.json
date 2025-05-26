@@ -1,24 +1,8 @@
 [
   {
-    "name": "Lagos",
-    "rating": 102.0,
-    "slope": 64,
-    "pars": [
-      3,
-      3,
-      3,
-      3,
-      3,
-      3,
-      3,
-      3,
-      3
-    ]
-  },
-  {
-    "name": "Rojas",
-    "rating": 64.0,
-    "slope": 102,
+    "name": "18",
+    "rating": 70.3,
+    "slope": 126,
     "pars": [
       4,
       5,
