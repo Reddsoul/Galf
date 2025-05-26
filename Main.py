@@ -114,6 +114,9 @@ class GolfApp:
                         return
 
         total = sum([s for s in scores if s is not None])
+        course_handicap = self.selected_course.get("course_handicap", 0)
+        par = sum(self.selected_course["pars"])
+        target_score = par + round(course_handicap)
 
         round_data = {
             "course_name": self.selected_course["name"],
@@ -121,7 +124,8 @@ class GolfApp:
             "is_serious": self.is_serious,
             "notes": self.notes,
             "holes_played": len(scores),
-            "total_score": total
+            "total_score": total,
+            "target_score": target_score,  # NEW
         }
 
         self.rounds.append(round_data)
@@ -136,6 +140,7 @@ class GolfApp:
 
         tk.Label(self.debrief_window, text=f"Course: {round_data['course_name']}").pack()
         tk.Label(self.debrief_window, text=f"Total Score: {round_data['total_score']}").pack()
+        tk.Label(self.debrief_window, text=f"Target Score: {round_data.get('target_score', 'N/A')}").pack()
 
         tk.Label(self.debrief_window, text="Notes").pack()
         self.debrief_notes = tk.Text(self.debrief_window, height=5, width=40)
@@ -229,15 +234,32 @@ class GolfApp:
         messagebox.showinfo("Success", f"Saved course: {self.course_name}")
 
     def refresh_summary(self):
-        self.courses = load_json(COURSES_FILE)
-        self.rounds = load_json(ROUNDS_FILE)
+        self.handicap_index = self.calculate_handicap_index()
 
-        index = self.calculate_handicap_index()
-        best = self.get_best_round()
+        if isinstance(self.handicap_index, (int, float)):
+            handicap_text = f"Handicap Index: {self.handicap_index:.1f}"
+        else:
+            handicap_text = "Handicap Index: N/A"
 
-        self.handicap_label.config(text=f"Handicap Index: {index}")
-        self.best_round_label.config(text=f"Best Round: {best}")
-        self.total_rounds_label.config(text=f"Total Rounds: {len(self.rounds)}")
+        self.handicap_label.config(text=handicap_text)
+
+        if self.rounds:
+            serious_rounds = [r for r in self.rounds if r["is_serious"] and r["total_score"] is not None]
+            best = min(serious_rounds, key=lambda r: r["total_score"], default=None)
+            if best:
+                self.best_round_label.config(text=f"Best Round: {best['total_score']} on {best['course_name']}")
+            else:
+                self.best_round_label.config(text="Best Round: N/A")
+            self.total_rounds_label.config(text=f"Total Rounds: {len(self.rounds)}")
+        else:
+            self.best_round_label.config(text="Best Round: N/A")
+            self.total_rounds_label.config(text="Total Rounds: 0")
+    
+    def update_course_handicaps(self):
+        for course in self.courses:
+            par = sum(course["pars"])
+            course["course_handicap"] = round(self.handicap_index * (course["slope"] / 113) + (course["rating"] - par), 1)
+        save_json(COURSES_FILE, self.courses)
 
     def calculate_handicap_index(self):
         differentials = []
