@@ -1,28 +1,45 @@
 [
   {
     "name": "18",
-    "rating": 70.3,
-    "slope": 126,
     "pars": [
       4,
-      5,
-      4,
-      4,
-      3,
-      4,
-      5,
       4,
       4,
       4,
-      5,
-      4,
-      3,
-      4,
-      5,
       4,
       4,
-      5
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4,
+      4
     ],
-    "course_handicap": -1.9
+    "tee_boxes": [
+      {
+        "color": "red",
+        "rating": 64.0,
+        "slope": 125,
+        "handicap": -8.8
+      },
+      {
+        "color": "white",
+        "rating": 65.0,
+        "slope": 126,
+        "handicap": -7.8
+      },
+      {
+        "color": "blue",
+        "rating": 66.0,
+        "slope": 127,
+        "handicap": -6.7
+      }
+    ]
   }
 ]

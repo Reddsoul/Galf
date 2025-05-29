@@ -30,12 +30,11 @@ class GolfBackend:
         return next((c for c in self.courses if c["name"] == name), None)
 
     def add_course(self, course_data):
-        # course_data must include name, rating, slope, pars
-        # calculate course_handicap
+        # course_data now has: name, pars, tee_boxes:[{color,rating,slope},…]
         par_total = sum(course_data["pars"])
-        course_handicap = (course_data["slope"] / 113) * (course_data["rating"] - par_total)
-        course_data["course_handicap"] = round(course_handicap, 1)
-
+        for box in course_data["tee_boxes"]:
+            hc = (box["slope"]/113) * (box["rating"] - par_total)
+            box["handicap"] = round(hc, 1)
         self.courses.append(course_data)
         save_json(COURSES_FILE, self.courses)
 
@@ -45,12 +44,16 @@ class GolfBackend:
         return self.rounds
 
     def add_round(self, round_data):
-        # round_data must include course_name, scores, is_serious, notes, holes_played, total_score
-        # backend will also store target_score
+        # round_data must now include 'tee_color'
         course = self.get_course_by_name(round_data["course_name"])
-        if course:
-            par = sum(course["pars"])
-            round_data["target_score"] = par + round(course["course_handicap"])
+        if not course: return
+        # find the tee box they played from:
+        box = next(b for b in course["tee_boxes"] if b["color"] == round_data["tee_color"])
+        par = sum(course["pars"])
+        round_data["target_score"] = par + round(box["handicap"])
+        # also store rating/slope for index calc:
+        round_data["tee_rating"] = box["rating"]
+        round_data["tee_slope"]  = box["slope"]
         self.rounds.append(round_data)
         save_json(ROUNDS_FILE, self.rounds)
 
@@ -60,13 +63,11 @@ class GolfBackend:
         diffs = []
         for r in self.rounds:
             if r.get("is_serious") and r.get("holes_played") == 18:
-                course = self.get_course_by_name(r["course_name"])
-                if course:
-                    try:
-                        diff = (113 * (r["total_score"] - course["rating"])) / course["slope"]
-                        diffs.append(round(diff, 1))
-                    except ZeroDivisionError:
-                        pass
+                try:
+                    diff = (113 * (r["total_score"] - r["tee_rating"])) / r["tee_slope"]
+                    diffs.append(round(diff, 1))
+                except ZeroDivisionError:
+                    pass
 
         diffs.sort()
         n = len(diffs)

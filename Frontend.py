@@ -67,16 +67,10 @@ class GolfApp:
         self.course_window.title("Add New Course")
 
         tk.Label(self.course_window, text="Course Name").grid(row=0, column=0)
-        tk.Label(self.course_window, text="Rating").grid(row=1, column=0)
-        tk.Label(self.course_window, text="Slope").grid(row=2, column=0)
 
         self.course_name_entry   = tk.Entry(self.course_window)
-        self.course_rating_entry = tk.Entry(self.course_window)
-        self.course_slope_entry  = tk.Entry(self.course_window)
 
         self.course_name_entry.grid(row=0, column=1)
-        self.course_rating_entry.grid(row=1, column=1)
-        self.course_slope_entry.grid(row=2, column=1)
 
         tk.Button(self.course_window, text="Next",
                   command=self.ask_hole_count
@@ -85,10 +79,10 @@ class GolfApp:
     def ask_hole_count(self):
         try:
             self.course_name = self.course_name_entry.get().strip()
-            self.course_rating = float(self.course_rating_entry.get())
-            self.course_slope  = int(self.course_slope_entry.get())
+
         except ValueError:
-            messagebox.showerror("Error", "Rating must be a float and slope an integer.")
+            messagebox.showerror("Error", "name cannot be empty.")
+        
             return
 
         for w in self.course_window.winfo_children():
@@ -121,18 +115,56 @@ class GolfApp:
             for j, val in enumerate((3,4,5)):
                 tk.Radiobutton(self.course_window, text=str(val),
                                variable=var, value=val).grid(row=i+1, column=j+1)
+        
+        tk.Button(self.course_window, text="Next",
+                  command=self.ask_tee_count
+                 ).grid(row=self.num_holes+2, columnspan=4, pady=10)
+
+
+    def ask_tee_count(self):
+        for w in self.course_window.winfo_children(): w.destroy()
+        tk.Label(self.course_window, text="How many tee boxes?").pack(pady=5)
+        self.tee_count_var = tk.IntVar(value=3)
+        tk.Spinbox(self.course_window, from_=1, to=10,
+                   textvariable=self.tee_count_var, width=5).pack()
+        tk.Button(self.course_window, text="Next",
+                  command=self.ask_tee_boxes
+                 ).pack(pady=10)
+        
+    def ask_tee_boxes(self):
+        count = self.tee_count_var.get()
+        for w in self.course_window.winfo_children(): w.destroy()
+        self.tee_entries = []
+        for i in range(count):
+            row = i
+            tk.Label(self.course_window, text=f"Tee #{i+1} Color").grid(row=row, column=0)
+            tk.Label(self.course_window, text="Rating").grid(row=row, column=2)
+            tk.Label(self.course_window, text="Slope").grid(row=row, column=4)
+            color_e = tk.Entry(self.course_window); color_e.grid(row=row, column=1)
+            rate_e  = tk.Entry(self.course_window); rate_e.grid(row=row, column=3)
+            slope_e = tk.Entry(self.course_window); slope_e.grid(row=row, column=5)
+            self.tee_entries.append((color_e, rate_e, slope_e))
 
         tk.Button(self.course_window, text="Save Course",
                   command=self.save_course
-                 ).grid(row=self.num_holes+1, columnspan=4, pady=10)
+                 ).grid(row=count+1, columnspan=6, pady=10)
 
     def save_course(self):
         pars = [v.get() for v in self.par_vars]
+        tees = []
+        for color_e, rate_e, slope_e in self.tee_entries:
+            try:
+                color = color_e.get().strip()
+                rating = float(rate_e.get())
+                slope  = int(slope_e.get())
+            except ValueError:
+                return messagebox.showerror("Error",
+                    "Tee boxes need a color, float rating, integer slope.")
+            tees.append({"color": color, "rating": rating, "slope": slope})
         data = {
-            "name":   self.course_name,
-            "rating": self.course_rating,
-            "slope":  self.course_slope,
-            "pars":   pars
+            "name": self.course_name,
+            "pars": pars,
+            "tee_boxes": tees
         }
         self.backend.add_course(data)
         self.course_window.destroy()
@@ -146,7 +178,8 @@ class GolfApp:
         self.log_window = tk.Toplevel(self.root)
         self.log_window.title("Log a Round")
 
-        tk.Label(self.log_window, text="Select Course").grid(row=0, column=0)
+        # Select Course
+        tk.Label(self.log_window, text="Select Course").grid(row=0, column=0, sticky='w')
         courses = self.backend.get_courses()
         names   = [c["name"] for c in courses]
 
@@ -158,57 +191,81 @@ class GolfApp:
         self.course_menu.grid(row=0, column=1, padx=5, pady=5)
         self.course_menu.bind("<<ComboboxSelected>>", self.update_course_info)
 
+        # Select Tee Box (populated in update_course_info)
+        tk.Label(self.log_window, text="Select Tee Box").grid(row=1, column=0, sticky='w')
+        self.tee_var  = tk.StringVar()
+        self.tee_menu = ttk.Combobox(self.log_window,
+                                     textvariable=self.tee_var,
+                                     state='readonly')
+        self.tee_menu.grid(row=1, column=1, padx=5, pady=5)
+        self.tee_menu.bind("<<ComboboxSelected>>", self.update_course_info)
+
+        # Handicap & Target
         self.course_handicap_label = tk.Label(self.log_window, text="Course Handicap: N/A")
-        self.course_handicap_label.grid(row=1, column=0, columnspan=2, sticky='w')
-
+        self.course_handicap_label.grid(row=2, column=0, columnspan=2, sticky='w')
         self.target_score_label    = tk.Label(self.log_window, text="Target Score: N/A")
-        self.target_score_label.grid(row=2, column=0, columnspan=2, sticky='w')
+        self.target_score_label.grid(row=3, column=0, columnspan=2, sticky='w')
 
+        # Serious Round?
         self.is_serious_var = tk.BooleanVar()
         tk.Checkbutton(self.log_window, text="Serious Round",
                        variable=self.is_serious_var
-                      ).grid(row=3, columnspan=2, pady=5)
+                      ).grid(row=4, column=0, columnspan=2, pady=5, sticky='w')
 
-        tk.Label(self.log_window, text="Notes").grid(row=4, column=0)
+        # Notes
+        tk.Label(self.log_window, text="Notes").grid(row=5, column=0, sticky='w')
         self.notes_entry = tk.Entry(self.log_window, width=40)
-        self.notes_entry.grid(row=4, column=1, pady=5)
+        self.notes_entry.grid(row=5, column=1, pady=5, sticky='w')
 
+        # Next button
         tk.Button(self.log_window, text="Next",
                   command=self.start_round_input
-                 ).grid(row=5, columnspan=2, pady=10)
+                 ).grid(row=6, column=0, columnspan=2, pady=10)
 
     def update_course_info(self, _=None):
         name   = self.course_var.get()
         course = self.backend.get_course_by_name(name)
-        if course:
-            ch = course.get("course_handicap", "N/A")
-            par_sum = sum(course["pars"])
-            ts = par_sum + (round(ch) if isinstance(ch, (int,float)) else 0)
-            self.course_handicap_label.config(text=f"Course Handicap: {ch}")
-            self.target_score_label.config(text=f"Target Score: {ts}")
-        else:
-            self.course_handicap_label.config(text="Course Handicap: N/A")
-            self.target_score_label.config(text="Target Score: N/A")
+        if not course:
+            return
+
+        # Populate tee boxes
+        colors = [b["color"] for b in course["tee_boxes"]]
+        self.tee_menu.config(values=colors)
+        if self.tee_var.get() not in colors:
+            self.tee_var.set(colors[0])
+
+        # Update labels based on selected tee
+        box = next(b for b in course["tee_boxes"] if b["color"] == self.tee_var.get())
+        ch = box.get("handicap", "N/A")
+        par_sum = sum(course["pars"])
+        ts = par_sum + (round(ch) if isinstance(ch, (int, float)) else 0)
+
+        self.course_handicap_label.config(text=f"Course Handicap: {ch}")
+        self.target_score_label.config(text=f"Target Score: {ts}")
 
     def start_round_input(self):
         course_name = self.course_var.get()
-        if not course_name:
-            messagebox.showerror("Error", "Please select a course.")
+        tee_color   = self.tee_var.get()
+        if not course_name or not tee_color:
+            messagebox.showerror("Error", "Please select both course and tee box.")
             return
 
         self.selected_course = self.backend.get_course_by_name(course_name)
+        self.selected_tee    = tee_color
         self.is_serious      = self.is_serious_var.get()
         self.notes           = self.notes_entry.get().strip()
 
-        # clear window
+        # Clear window
         for w in self.log_window.winfo_children():
             w.destroy()
 
+        # Header
+        hole_count = len(self.selected_course["pars"])
         tk.Label(self.log_window,
-                 text=f"Scoring for {self.selected_course['name']} "
-                      f"({len(self.selected_course['pars'])} Holes)"
+                 text=f"Scoring for {self.selected_course['name']} ({hole_count} Holes, Tee: {tee_color})"
                 ).grid(row=0, column=0, columnspan=3, pady=5)
 
+        # Score entries
         self.score_entries = []
         for i, par in enumerate(self.selected_course["pars"], start=1):
             tk.Label(self.log_window, text=f"Hole {i} (Par {par})")\
@@ -217,14 +274,15 @@ class GolfApp:
             e.grid(row=i, column=1)
             self.score_entries.append(e)
             if not self.is_serious:
-                tk.Label(self.log_window, text='(Enter number or skip)')\
+                tk.Label(self.log_window, text="(enter number or skip)")\
                   .grid(row=i, column=2, sticky='w')
 
+        # Submit button
         tk.Button(self.log_window, text="Submit Round",
                   command=self.submit_round
-                 ).grid(row=len(self.score_entries)+1, columnspan=3, pady=10)
-
+                 ).grid(row=hole_count+1, column=0, columnspan=3, pady=10)
     def submit_round(self):
+        # Gather scores
         scores = []
         for e in self.score_entries:
             v = e.get().strip()
@@ -235,7 +293,7 @@ class GolfApp:
                     messagebox.showerror("Error", "All scores must be numbers for serious rounds.")
                     return
             else:
-                if v.lower() == "skip":
+                if v.lower() == "skip" or v == "":
                     scores.append(None)
                 else:
                     try:
@@ -247,12 +305,14 @@ class GolfApp:
         total = sum(s for s in scores if s is not None)
         rd = {
             "course_name": self.selected_course["name"],
+            "tee_color":   self.selected_tee,
             "scores":      scores,
             "is_serious":  self.is_serious,
             "notes":       self.notes,
             "holes_played": len(scores),
             "total_score": total
         }
+
         self.backend.add_round(rd)
         self.log_window.destroy()
         self.show_debrief(rd)
