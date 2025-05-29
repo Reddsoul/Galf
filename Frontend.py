@@ -19,6 +19,11 @@ class GolfApp:
         tk.Button(self.main_frame, text="Log a Round",
                   command=self.open_log_round_page, width=30
                  ).pack(pady=5)
+        
+        tk.Button(self.main_frame, text="View Scorecards",
+                  command=self.open_scorecards_page, width=30
+                 ).pack(pady=5)
+
 
         # -- Summary Panel --
         self.info_frame = tk.LabelFrame(self.main_frame,
@@ -192,8 +197,8 @@ class GolfApp:
             return
 
         self.selected_course = self.backend.get_course_by_name(course_name)
-        self.is_serious     = self.is_serious_var.get()
-        self.notes          = self.notes_entry.get().strip()
+        self.is_serious      = self.is_serious_var.get()
+        self.notes           = self.notes_entry.get().strip()
 
         # clear window
         for w in self.log_window.winfo_children():
@@ -284,6 +289,74 @@ class GolfApp:
 
         window.destroy()
         self.refresh_summary()
+
+    # -------------------
+    # Score card view
+    # -------------------
+
+    def open_scorecards_page(self):
+        """Open a window listing all saved rounds."""
+        self.scorecards_window = tk.Toplevel(self.root)
+        self.scorecards_window.title("Scorecards")
+
+        cols = ("Course", "Score", "Target", "Serious")
+        self.score_tree = ttk.Treeview(self.scorecards_window,
+                                    columns=cols, show="headings")
+        for col in cols:
+            self.score_tree.heading(col, text=col)
+            self.score_tree.column(col, width=100, anchor='center')
+        self.score_tree.pack(fill='both', expand=True, padx=10, pady=10)
+
+        self.populate_scorecards()
+        self.score_tree.bind("<Double-1>", self.on_scorecard_select)
+
+
+    def populate_scorecards(self):
+        """Load all rounds into the Treeview."""
+        for row in self.score_tree.get_children():
+            self.score_tree.delete(row)
+        for idx, rd in enumerate(self.backend.get_rounds()):
+            vals = (
+                rd["course_name"],
+                rd["total_score"],
+                rd.get("target_score", "N/A"),
+                "Yes" if rd["is_serious"] else "No"
+            )
+            self.score_tree.insert("", "end", iid=str(idx), values=vals)
+
+
+    def on_scorecard_select(self, event):
+        """Show the details for the selected round."""
+        sel = self.score_tree.focus()
+        if not sel:
+            return
+        rd = self.backend.get_rounds()[int(sel)]
+
+        win = tk.Toplevel(self.scorecards_window)
+        win.title(f"Details – {rd['course_name']}")
+
+        # Basic info
+        info = [
+            f"Course: {rd['course_name']}",
+            f"Total Score: {rd['total_score']}",
+            f"Target Score: {rd.get('target_score','N/A')}",
+            f"Serious Round: {'Yes' if rd['is_serious'] else 'No'}"
+        ]
+        for line in info:
+            tk.Label(win, text=line).pack(anchor='w', padx=10)
+
+        # Hole-by-hole
+        tk.Label(win, text="Hole-by-Hole:").pack(anchor='w', padx=10, pady=(10,0))
+        for i, sc in enumerate(rd["scores"], start=1):
+            txt = sc if sc is not None else "Skipped"
+            tk.Label(win, text=f"  Hole {i}: {txt}").pack(anchor='w', padx=20)
+
+        # Notes
+        tk.Label(win, text="Notes:").pack(anchor='w', padx=10, pady=(10,0))
+        txt = tk.Text(win, height=5, width=40)
+        txt.insert("1.0", rd["notes"])
+        txt.config(state='disabled')
+        txt.pack(padx=10, pady=(0,10))
 
 if __name__ == "__main__":
     root = tk.Tk()

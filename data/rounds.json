@@ -82,5 +82,33 @@
     "holes_played": 18,
     "total_score": 77,
     "target_score": 77
+  },
+  {
+    "course_name": "18",
+    "scores": [
+      null,
+      8,
+      2,
+      4,
+      3,
+      7,
+      2,
+      6,
+      6,
+      9,
+      8,
+      1,
+      2,
+      32,
+      4,
+      4,
+      6,
+      1
+    ],
+    "is_serious": false,
+    "notes": "Testing notes",
+    "holes_played": 18,
+    "total_score": 105,
+    "target_score": 73
   }
 ]
