@@ -13,7 +13,11 @@ class GolfApp:
         self.main_frame.pack(padx=20, pady=20)
 
         tk.Button(self.main_frame, text="Add New Course",
-                  command=self.open_course_window, width=30
+                  command=lambda: self.open_course_window(), width=30
+                 ).pack(pady=5)
+
+        tk.Button(self.main_frame, text="Manage Courses",
+                  command=self.open_manage_courses, width=30
                  ).pack(pady=5)
 
         tk.Button(self.main_frame, text="Log a Round",
@@ -42,7 +46,6 @@ class GolfApp:
     # -------------------
     # Summary / Refresh
     # -------------------
-
     def refresh_summary(self):
         rounds = self.backend.get_rounds()
         self.total_rounds_label.config(text=f"Total Rounds: {len(rounds)}")
@@ -59,37 +62,70 @@ class GolfApp:
         self.handicap_label.config(text=f"Handicap Index: {idx_text}")
 
     # -------------------
-    # Add Course Flow
+    # Course Management
     # -------------------
+    def open_manage_courses(self):
+        win = tk.Toplevel(self.root)
+        win.title("Manage Courses")
+        cols = ("Club", "Name")
+        tree = ttk.Treeview(win, columns=cols, show="headings")
+        for col in cols:
+            tree.heading(col, text=col)
+            tree.column(col, width=150, anchor='center')
+        tree.pack(fill='both', expand=True, padx=10, pady=10)
+        for c in self.backend.get_courses():
+            tree.insert("", "end", values=(c.get("club", ""), c["name"]))
+        tree.bind("<Double-1>", lambda e: self.on_course_select(e, tree, win))
 
-    def open_course_window(self):
+    def on_course_select(self, event, tree, parent):
+        sel = tree.focus()
+        if not sel:
+            return
+        club, name = tree.item(sel)["values"]
+        course = self.backend.get_course_by_name(name)
+        parent.destroy()
+        self.open_course_window(course)
+
+    # -------------------
+    # Add / Edit Course Flow
+    # -------------------
+    def open_course_window(self, course=None):
+        self.editing_course = course
+        self.original_name = course["name"] if course else None
         self.course_window = tk.Toplevel(self.root)
-        self.course_window.title("Add New Course")
+        self.course_window.title("Edit Course" if course else "Add New Course")
 
-        tk.Label(self.course_window, text="Course Name").grid(row=0, column=0)
+        # Club & Name
+        tk.Label(self.course_window, text="Club").grid(row=0, column=0)
+        self.club_entry = tk.Entry(self.course_window)
+        self.club_entry.grid(row=0, column=1)
+        tk.Label(self.course_window, text="Course Name").grid(row=1, column=0)
+        self.course_name_entry = tk.Entry(self.course_window)
+        self.course_name_entry.grid(row=1, column=1)
+        if course:
+            self.club_entry.insert(0, course.get("club", ""))
+            self.course_name_entry.insert(0, course["name"])
 
-        self.course_name_entry   = tk.Entry(self.course_window)
-
-        self.course_name_entry.grid(row=0, column=1)
-
+        # Next
         tk.Button(self.course_window, text="Next",
                   command=self.ask_hole_count
-                 ).grid(row=3, columnspan=2, pady=10)
+                 ).grid(row=2, columnspan=2, pady=10)
 
     def ask_hole_count(self):
-        try:
-            self.course_name = self.course_name_entry.get().strip()
+        # Capture club and name
+        self.course_club = self.club_entry.get().strip()
+        self.course_name = self.course_name_entry.get().strip()
+        if not self.course_club:
+            return messagebox.showerror("Error", "Club cannot be empty.")
+        if not self.course_name:
+            return messagebox.showerror("Error", "Course name cannot be empty.")
 
-        except ValueError:
-            messagebox.showerror("Error", "name cannot be empty.")
-        
-            return
-
+        # Clear window
         for w in self.course_window.winfo_children():
             w.destroy()
 
         tk.Label(self.course_window, text="Number of Holes").pack(pady=5)
-        self.hole_count_var = tk.IntVar(value=9)
+        self.hole_count_var = tk.IntVar(value=len(self.editing_course["pars"]) if self.editing_course else 9)
         tk.Radiobutton(self.course_window, text="9 Holes",
                        variable=self.hole_count_var, value=9).pack()
         tk.Radiobutton(self.course_window, text="18 Holes",
@@ -108,9 +144,10 @@ class GolfApp:
             .grid(row=0, column=0, columnspan=4, pady=5)
 
         self.par_vars = []
+        existing_pars = self.editing_course["pars"] if self.editing_course else []
         for i in range(self.num_holes):
             tk.Label(self.course_window, text=f"Hole {i+1}").grid(row=i+1, column=0)
-            var = tk.IntVar(value=4)
+            var = tk.IntVar(value=existing_pars[i] if i < len(existing_pars) else 4)
             self.par_vars.append(var)
             for j, val in enumerate((3,4,5)):
                 tk.Radiobutton(self.course_window, text=str(val),
@@ -120,11 +157,11 @@ class GolfApp:
                   command=self.ask_tee_count
                  ).grid(row=self.num_holes+2, columnspan=4, pady=10)
 
-
     def ask_tee_count(self):
         for w in self.course_window.winfo_children(): w.destroy()
         tk.Label(self.course_window, text="How many tee boxes?").pack(pady=5)
-        self.tee_count_var = tk.IntVar(value=3)
+        existing_count = len(self.editing_course["tee_boxes"]) if self.editing_course else 3
+        self.tee_count_var = tk.IntVar(value=existing_count)
         tk.Spinbox(self.course_window, from_=1, to=10,
                    textvariable=self.tee_count_var, width=5).pack()
         tk.Button(self.course_window, text="Next",
@@ -135,6 +172,7 @@ class GolfApp:
         count = self.tee_count_var.get()
         for w in self.course_window.winfo_children(): w.destroy()
         self.tee_entries = []
+        existing_tb = self.editing_course["tee_boxes"] if self.editing_course else []
         for i in range(count):
             row = i
             tk.Label(self.course_window, text=f"Tee #{i+1} Color").grid(row=row, column=0)
@@ -143,6 +181,10 @@ class GolfApp:
             color_e = tk.Entry(self.course_window); color_e.grid(row=row, column=1)
             rate_e  = tk.Entry(self.course_window); rate_e.grid(row=row, column=3)
             slope_e = tk.Entry(self.course_window); slope_e.grid(row=row, column=5)
+            if i < len(existing_tb):
+                color_e.insert(0, existing_tb[i]["color"])
+                rate_e.insert(0, existing_tb[i]["rating"])
+                slope_e.insert(0, existing_tb[i]["slope"])
             self.tee_entries.append((color_e, rate_e, slope_e))
 
         tk.Button(self.course_window, text="Save Course",
@@ -161,12 +203,18 @@ class GolfApp:
                 return messagebox.showerror("Error",
                     "Tee boxes need a color, float rating, integer slope.")
             tees.append({"color": color, "rating": rating, "slope": slope})
+
         data = {
+            "club": self.course_club,
             "name": self.course_name,
             "pars": pars,
             "tee_boxes": tees
         }
-        self.backend.add_course(data)
+        if self.editing_course:
+            self.backend.update_course(self.original_name, data)
+        else:
+            self.backend.add_course(data)
+
         self.course_window.destroy()
         self.refresh_summary()
 

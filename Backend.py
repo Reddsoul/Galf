@@ -1,7 +1,7 @@
 import json
 import os
 from statistics import mean
-
+# --- Data files ---
 COURSES_FILE = 'data/courses.json'
 ROUNDS_FILE  = 'data/rounds.json'
 
@@ -15,6 +15,7 @@ def save_json(filename, data):
     with open(filename, 'w') as f:
         json.dump(data, f, indent=2)
 
+# --- Backend Logic ---
 class GolfBackend:
     def __init__(self):
         os.makedirs('data', exist_ok=True)
@@ -22,7 +23,6 @@ class GolfBackend:
         self.rounds  = load_json(ROUNDS_FILE)
 
     # ---- Courses ----
-
     def get_courses(self):
         return self.courses
 
@@ -30,7 +30,7 @@ class GolfBackend:
         return next((c for c in self.courses if c["name"] == name), None)
 
     def add_course(self, course_data):
-        # course_data now has: name, pars, tee_boxes:[{color,rating,slope},…]
+        # course_data has: name, club, pars, tee_boxes
         par_total = sum(course_data["pars"])
         for box in course_data["tee_boxes"]:
             hc = (box["slope"]/113) * (box["rating"] - par_total)
@@ -38,27 +38,35 @@ class GolfBackend:
         self.courses.append(course_data)
         save_json(COURSES_FILE, self.courses)
 
-    # ---- Rounds ----
+    def update_course(self, original_name, course_data):
+        # recalculate handicaps and replace existing course
+        par_total = sum(course_data["pars"])
+        for box in course_data["tee_boxes"]:
+            hc = (box["slope"]/113) * (box["rating"] - par_total)
+            box["handicap"] = round(hc, 1)
+        for i, c in enumerate(self.courses):
+            if c["name"] == original_name:
+                self.courses[i] = course_data
+                break
+        save_json(COURSES_FILE, self.courses)
 
+    # ---- Rounds ----
     def get_rounds(self):
         return self.rounds
 
     def add_round(self, round_data):
-        # round_data must now include 'tee_color'
         course = self.get_course_by_name(round_data["course_name"])
-        if not course: return
-        # find the tee box they played from:
+        if not course:
+            return
         box = next(b for b in course["tee_boxes"] if b["color"] == round_data["tee_color"])
         par = sum(course["pars"])
         round_data["target_score"] = par + round(box["handicap"])
-        # also store rating/slope for index calc:
         round_data["tee_rating"] = box["rating"]
         round_data["tee_slope"]  = box["slope"]
         self.rounds.append(round_data)
         save_json(ROUNDS_FILE, self.rounds)
 
     # ---- Aggregates ----
-
     def calculate_handicap_index(self):
         diffs = []
         for r in self.rounds:
@@ -68,13 +76,10 @@ class GolfBackend:
                     diffs.append(round(diff, 1))
                 except ZeroDivisionError:
                     pass
-
         diffs.sort()
         n = len(diffs)
         if n < 3:
             return None
-
-        # USGA simplified table lookup
         if n == 3:     idx = diffs[0] - 2.0
         elif n == 4:   idx = diffs[0] - 1.0
         elif n == 5:   idx = diffs[0]
@@ -86,11 +91,8 @@ class GolfBackend:
         elif n <= 18:  idx = mean(diffs[:6])
         elif n == 19:  idx = mean(diffs[:7])
         else:          idx = mean(diffs[:8])
-
         return round(idx * 0.96, 1)
 
     def get_best_round(self):
         serious18 = [r for r in self.rounds if r.get("is_serious") and r.get("holes_played") == 18]
-        if not serious18:
-            return None
-        return min(serious18, key=lambda r: r["total_score"])
+        return min(serious18, key=lambda r: r["total_score"]) if serious18 else None
