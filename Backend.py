@@ -1,15 +1,24 @@
 import json
 import os
+import re
 from statistics import mean
 from datetime import datetime
+
+# PDF library for direct rulebook access
+try:
+    import fitz  # PyMuPDF
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
 
 # --- Data files ---
 COURSES_FILE = 'data/courses.json'
 ROUNDS_FILE = 'data/rounds.json'
 CLUBS_FILE = 'data/clubs.json'
-RULEBOOK_FILE = 'data/rulebook.json'
+RULEBOOK_PDF = 'data/2023_Rules_of_Golf.pdf'  # Changed from JSON to PDF
 BOOKMARKS_FILE = 'data/bookmarks.json'
 RULE_NOTES_FILE = 'data/rule_notes.json'
+RULEBOOK_CACHE_FILE = 'data/rulebook_cache.json'  # Cache for parsed structure
 
 
 def load_json(filename):
@@ -22,6 +31,373 @@ def load_json(filename):
 def save_json(filename, data):
     with open(filename, 'w') as f:
         json.dump(data, f, indent=2)
+
+
+class PDFRulebook:
+    """
+    Direct PDF-based rulebook access.
+    Parses the Rules of Golf PDF on-the-fly for searches and browsing.
+    """
+    
+    def __init__(self, pdf_path):
+        self.pdf_path = pdf_path
+        self.doc = None
+        self._cache = None
+        self._page_text_cache = {}
+        
+        if PDF_AVAILABLE and os.path.exists(pdf_path):
+            self.doc = fitz.open(pdf_path)
+        
+    def is_available(self):
+        """Check if PDF is loaded and ready."""
+        return self.doc is not None
+    
+    def get_version(self):
+        """Return version info from the PDF."""
+        if not self.is_available():
+            return {"version": "Unknown", "last_updated": "Unknown"}
+        
+        # Extract version from PDF metadata or first page
+        metadata = self.doc.metadata
+        title = metadata.get('title', '')
+        
+        # Try to find year in title or filename
+        year_match = re.search(r'20\d{2}', title) or re.search(r'20\d{2}', self.pdf_path)
+        version = year_match.group(0) if year_match else "2023"
+        
+        return {
+            "version": version,
+            "last_updated": datetime.fromtimestamp(os.path.getmtime(self.pdf_path)).strftime("%Y-%m-%d")
+        }
+    
+    def get_page_text(self, page_num):
+        """Get text from a specific page with caching."""
+        if page_num in self._page_text_cache:
+            return self._page_text_cache[page_num]
+        
+        if not self.is_available() or page_num >= len(self.doc):
+            return ""
+        
+        text = self.doc[page_num].get_text()
+        self._page_text_cache[page_num] = text
+        return text
+    
+    def get_total_pages(self):
+        """Return total number of pages."""
+        return len(self.doc) if self.is_available() else 0
+    
+    def _parse_structure(self):
+        """Parse PDF to extract rule structure. Results are cached."""
+        if self._cache is not None:
+            return self._cache
+        
+        # Try to load from cache file first
+        if os.path.exists(RULEBOOK_CACHE_FILE):
+            try:
+                with open(RULEBOOK_CACHE_FILE, 'r') as f:
+                    cached = json.load(f)
+                    # Verify cache is for same PDF (check modification time)
+                    if cached.get('pdf_mtime') == os.path.getmtime(self.pdf_path):
+                        self._cache = cached
+                        return self._cache
+            except (json.JSONDecodeError, OSError):
+                pass
+        
+        if not self.is_available():
+            return {"sections": [], "rules": {}}
+        
+        sections = []
+        rules = {}
+        
+        # Patterns for rule detection
+        rule_heading_re = re.compile(r'^Rule\s+(\d+)\s*[–\-]\s*(.+)$', re.MULTILINE)
+        subrule_heading_re = re.compile(r'^(\d+\.\d+[a-z]?)\s+(.+)$', re.MULTILINE)
+        
+        full_text = ""
+        page_map = {}  # Map rule IDs to page numbers
+        
+        for page_num in range(len(self.doc)):
+            page_text = self.get_page_text(page_num)
+            start_pos = len(full_text)
+            full_text += page_text + "\n"
+            
+            # Track positions for page mapping
+            for match in rule_heading_re.finditer(page_text):
+                rule_id = match.group(1)
+                page_map[rule_id] = page_num
+            
+            for match in subrule_heading_re.finditer(page_text):
+                rule_id = match.group(1)
+                page_map[rule_id] = page_num
+        
+        # Parse main rules
+        current_section = None
+        current_rule_content = []
+        
+        for match in rule_heading_re.finditer(full_text):
+            rule_num = match.group(1)
+            title = match.group(2).strip()
+            
+            # Save previous section
+            if current_section:
+                sections.append(current_section)
+            
+            current_section = {
+                "id": rule_num,
+                "title": title,
+                "page": page_map.get(rule_num, 0),
+                "subrules": []
+            }
+        
+        # Add last section
+        if current_section:
+            sections.append(current_section)
+        
+        # Parse subrules and their content
+        lines = full_text.split('\n')
+        current_subrule = None
+        content_lines = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                if current_subrule and content_lines:
+                    content_lines.append("")  # Preserve paragraph breaks
+                continue
+            
+            # Check for new subrule
+            sub_match = subrule_heading_re.match(line)
+            if sub_match:
+                # Save previous subrule
+                if current_subrule:
+                    current_subrule["content"] = "\n".join(content_lines).strip()
+                    rules[current_subrule["id"]] = current_subrule
+                
+                sub_id = sub_match.group(1)
+                sub_title = sub_match.group(2).strip()
+                
+                # Find parent section
+                section_id = sub_id.split('.')[0]
+                
+                current_subrule = {
+                    "id": sub_id,
+                    "title": sub_title,
+                    "section_id": section_id,
+                    "page": page_map.get(sub_id, 0)
+                }
+                content_lines = []
+                
+                # Add to section's subrules list
+                for sec in sections:
+                    if sec["id"] == section_id:
+                        sec["subrules"].append({"id": sub_id, "title": sub_title})
+                        break
+                continue
+            
+            # Regular content line
+            if current_subrule:
+                # Skip page numbers and headers
+                if line.isdigit() and len(line) <= 3:
+                    continue
+                if line.startswith("Rules of Golf"):
+                    continue
+                content_lines.append(line)
+        
+        # Save last subrule
+        if current_subrule:
+            current_subrule["content"] = "\n".join(content_lines).strip()
+            rules[current_subrule["id"]] = current_subrule
+        
+        self._cache = {
+            "sections": sections,
+            "rules": rules,
+            "pdf_mtime": os.path.getmtime(self.pdf_path)
+        }
+        
+        # Save cache to file
+        try:
+            os.makedirs(os.path.dirname(RULEBOOK_CACHE_FILE), exist_ok=True)
+            with open(RULEBOOK_CACHE_FILE, 'w') as f:
+                json.dump(self._cache, f)
+        except OSError:
+            pass
+        
+        return self._cache
+    
+    def get_all_sections(self):
+        """Return list of (section_id, section_title, page_num) tuples."""
+        structure = self._parse_structure()
+        return [(s["id"], s["title"], s.get("page", 0)) for s in structure["sections"]]
+    
+    def get_section_rules(self, section_id):
+        """Get all rules in a specific section."""
+        structure = self._parse_structure()
+        rules = []
+        
+        for rule_id, rule in structure["rules"].items():
+            if rule.get("section_id") == section_id:
+                rules.append({
+                    "id": rule["id"],
+                    "title": rule["title"],
+                    "content": rule.get("content", ""),
+                    "page": rule.get("page", 0)
+                })
+        
+        # Sort by rule ID (1.1, 1.2, 1.3, etc.)
+        rules.sort(key=lambda x: [int(n) if n.isdigit() else n for n in re.split(r'(\d+)', x["id"])])
+        return rules
+    
+    def get_rule_by_id(self, rule_id):
+        """Get a specific rule by its ID."""
+        structure = self._parse_structure()
+        rule = structure["rules"].get(rule_id)
+        
+        if not rule:
+            return None
+        
+        # Find section info
+        section_id = rule.get("section_id", rule_id.split('.')[0])
+        section_title = ""
+        for sec in structure["sections"]:
+            if sec["id"] == section_id:
+                section_title = sec["title"]
+                break
+        
+        return {
+            "section_id": section_id,
+            "section_title": section_title,
+            "rule": {
+                "id": rule["id"],
+                "title": rule["title"],
+                "content": rule.get("content", ""),
+                "page": rule.get("page", 0)
+            }
+        }
+    
+    def search(self, query, max_results=50):
+        """
+        Search the PDF for rules matching the query.
+        Returns list of matching rules with context.
+        """
+        if not self.is_available():
+            return []
+        
+        query_lower = query.lower()
+        results = []
+        structure = self._parse_structure()
+        
+        # Search in parsed rules first (faster, structured)
+        for rule_id, rule in structure["rules"].items():
+            score = 0
+            
+            # Check title match (higher weight)
+            if query_lower in rule["title"].lower():
+                score += 10
+            
+            # Check ID match
+            if query_lower in rule_id.lower():
+                score += 5
+            
+            # Check content match
+            content = rule.get("content", "").lower()
+            if query_lower in content:
+                score += 1
+                # Boost for multiple occurrences
+                score += min(content.count(query_lower), 5)
+            
+            if score > 0:
+                # Find section info
+                section_id = rule.get("section_id", rule_id.split('.')[0])
+                section_title = ""
+                for sec in structure["sections"]:
+                    if sec["id"] == section_id:
+                        section_title = sec["title"]
+                        break
+                
+                results.append({
+                    "section_id": section_id,
+                    "section_title": section_title,
+                    "rule_id": rule["id"],
+                    "rule_title": rule["title"],
+                    "content": rule.get("content", ""),
+                    "page": rule.get("page", 0),
+                    "_score": score
+                })
+        
+        # Sort by relevance score
+        results.sort(key=lambda x: x["_score"], reverse=True)
+        
+        # Remove score from results
+        for r in results:
+            del r["_score"]
+        
+        return results[:max_results]
+    
+    def search_pdf_pages(self, query, context_chars=200):
+        """
+        Direct PDF text search with page references.
+        Returns list of (page_num, snippet) tuples.
+        """
+        if not self.is_available():
+            return []
+        
+        query_lower = query.lower()
+        results = []
+        
+        for page_num in range(len(self.doc)):
+            page_text = self.get_page_text(page_num)
+            text_lower = page_text.lower()
+            
+            # Find all occurrences
+            start = 0
+            while True:
+                pos = text_lower.find(query_lower, start)
+                if pos == -1:
+                    break
+                
+                # Extract context around match
+                ctx_start = max(0, pos - context_chars)
+                ctx_end = min(len(page_text), pos + len(query) + context_chars)
+                snippet = page_text[ctx_start:ctx_end].strip()
+                
+                # Clean up snippet
+                snippet = ' '.join(snippet.split())
+                if ctx_start > 0:
+                    snippet = "..." + snippet
+                if ctx_end < len(page_text):
+                    snippet = snippet + "..."
+                
+                results.append({
+                    "page": page_num + 1,  # 1-indexed for display
+                    "snippet": snippet
+                })
+                
+                start = pos + 1
+                
+                # Limit results per page
+                if len([r for r in results if r["page"] == page_num + 1]) >= 3:
+                    break
+        
+        return results
+    
+    def get_page_content(self, page_num):
+        """Get full content of a specific page."""
+        if not self.is_available() or page_num < 0 or page_num >= len(self.doc):
+            return ""
+        return self.get_page_text(page_num)
+    
+    def clear_cache(self):
+        """Clear all caches to force re-parsing."""
+        self._cache = None
+        self._page_text_cache = {}
+        if os.path.exists(RULEBOOK_CACHE_FILE):
+            os.remove(RULEBOOK_CACHE_FILE)
+    
+    def close(self):
+        """Close the PDF document."""
+        if self.doc:
+            self.doc.close()
+            self.doc = None
 
 
 # --- Backend Logic ---
@@ -393,510 +769,85 @@ class GolfBackend:
         """Return clubs sorted by distance (longest first)."""
         return sorted(self.clubs, key=lambda c: c.get("distance", 0), reverse=True)
 
-    # ---- Rulebook Management ----
+    # ---- Rulebook Management (PDF-based) ----
     def _load_rulebook(self):
-        """Load the rulebook from file or create default structure."""
-        if os.path.exists(RULEBOOK_FILE):
-            return load_json(RULEBOOK_FILE)
-        else:
-            # Create default rulebook structure with sample USGA/PGA rules
-            default_rulebook = self._create_default_rulebook()
-            save_json(RULEBOOK_FILE, default_rulebook)
-            return default_rulebook
-
-    def _create_default_rulebook(self):
-        """Create a default rulebook with USGA/PGA rules structure."""
-        return {
-            "version": "2024",
-            "last_updated": datetime.now().strftime("%Y-%m-%d"),
-            "sections": [
-                {
-                    "id": "1",
-                    "title": "The Game, Player Conduct and the Rules",
-                    "rules": [
-                        {
-                            "id": "1.1",
-                            "title": "The Game of Golf",
-                            "content": "Golf is played in a round of 18 (or fewer) holes on a course by striking a ball with a club. Each hole starts with a stroke from the teeing area and ends when the ball is holed on the putting green (or when the Rules otherwise say the hole is completed). For each stroke, the player must play the ball as it lies and play the course as they find it."
-                        },
-                        {
-                            "id": "1.2",
-                            "title": "Standards of Player Conduct",
-                            "content": "All players are expected to play in the spirit of the game by acting with integrity, showing consideration to others, and taking good care of the course. Players should play at a prompt pace and look out for the safety of others."
-                        },
-                        {
-                            "id": "1.3",
-                            "title": "Playing by the Rules",
-                            "content": "Players are responsible for applying the Rules to themselves. Players are expected to recognize when they have breached a Rule, be honest in reporting, and promptly apply any penalty."
-                        }
-                    ]
-                },
-                {
-                    "id": "2",
-                    "title": "The Course",
-                    "rules": [
-                        {
-                            "id": "2.1",
-                            "title": "Course Boundaries and Out of Bounds",
-                            "content": "The course is all areas inside the boundary edge set by the Committee. All areas outside the boundary edge are out of bounds. The boundary edge extends both up and down from the ground."
-                        },
-                        {
-                            "id": "2.2",
-                            "title": "Defined Areas of the Course",
-                            "content": "There are five defined areas of the course: (1) The general area, (2) The teeing area, (3) All penalty areas, (4) All bunkers, and (5) The putting green of the hole being played."
-                        },
-                        {
-                            "id": "2.3",
-                            "title": "Objects and Conditions that Can Affect Play",
-                            "content": "Certain Rules may give free relief from obstructions, abnormal course conditions, dangerous animal conditions, or integral objects."
-                        }
-                    ]
-                },
-                {
-                    "id": "3",
-                    "title": "The Competition",
-                    "rules": [
-                        {
-                            "id": "3.1",
-                            "title": "Match Play and Stroke Play",
-                            "content": "In Match Play, a player and opponent compete against each other based on holes won, lost or tied. In Stroke Play, all players compete against one another based on total score."
-                        },
-                        {
-                            "id": "3.2",
-                            "title": "The Scorecard",
-                            "content": "In stroke play, the player's scorecard is used to record the player's handicap and score for each hole. The player is responsible for the correctness of the hole scores entered on the scorecard."
-                        },
-                        {
-                            "id": "3.3",
-                            "title": "Handicaps",
-                            "content": "A handicap is used to allow players of different abilities to compete on an equal basis. The Course Handicap™ is the number of strokes the player receives to adjust their gross score to a net score."
-                        }
-                    ]
-                },
-                {
-                    "id": "4",
-                    "title": "Player's Equipment",
-                    "rules": [
-                        {
-                            "id": "4.1",
-                            "title": "Clubs",
-                            "content": "A player may carry no more than 14 clubs during a round. Clubs must conform to the requirements in the Equipment Rules. If a club is damaged during a round, the player may continue to use the damaged club or have it repaired."
-                        },
-                        {
-                            "id": "4.2",
-                            "title": "Balls",
-                            "content": "The ball must conform to the requirements in the Equipment Rules. A player must hole out with the same ball played from the teeing area unless the Rules allow or require substitution."
-                        },
-                        {
-                            "id": "4.3",
-                            "title": "Use of Equipment",
-                            "content": "Players may use equipment to help play, but must not use equipment in a way that gives artificial advantage or goes against the spirit of the game."
-                        }
-                    ]
-                },
-                {
-                    "id": "5",
-                    "title": "Playing the Round",
-                    "rules": [
-                        {
-                            "id": "5.1",
-                            "title": "Starting a Round",
-                            "content": "A player's round starts when the player makes a stroke to begin their first hole. The player must start at the time and place set by the Committee."
-                        },
-                        {
-                            "id": "5.2",
-                            "title": "Practicing on Course",
-                            "content": "Before or between rounds, players may practice on the competition course unless prohibited by Committee. Between holes, practice strokes are not allowed except on or near the putting green just completed."
-                        },
-                        {
-                            "id": "5.3",
-                            "title": "Ending a Round",
-                            "content": "A player's round ends when all holes have been completed or when the player has been disqualified."
-                        }
-                    ]
-                },
-                {
-                    "id": "6",
-                    "title": "Playing a Hole",
-                    "rules": [
-                        {
-                            "id": "6.1",
-                            "title": "Starting Play of a Hole",
-                            "content": "A hole begins when the player makes a stroke from the teeing area to begin the hole. The ball must be played from within the teeing area."
-                        },
-                        {
-                            "id": "6.2",
-                            "title": "Playing Ball from Teeing Area",
-                            "content": "A ball is in the teeing area when any part of the ball touches or is above any part of the teeing area. The player may use a tee."
-                        },
-                        {
-                            "id": "6.3",
-                            "title": "Ball Used in Play of Hole",
-                            "content": "A player must normally hole out with the same ball played from the teeing area. Substitution is allowed when a ball is lost, in a penalty area, or unplayable."
-                        }
-                    ]
-                },
-                {
-                    "id": "7",
-                    "title": "Ball Search and Identification",
-                    "rules": [
-                        {
-                            "id": "7.1",
-                            "title": "How to Fairly Search",
-                            "content": "A player may take reasonable actions to find and identify their ball, including moving sand, water, and movable obstructions. If excess damage is caused, the player must restore the original lie."
-                        },
-                        {
-                            "id": "7.2",
-                            "title": "Identifying Ball",
-                            "content": "A player's ball at rest may be identified by seeing it come to rest, by an identifying mark on the ball, or by finding a ball with the same characteristics in an area where the ball is expected to be."
-                        },
-                        {
-                            "id": "7.3",
-                            "title": "Ball Lost",
-                            "content": "A ball is lost if not found within 3 minutes after the player or caddie begins to search for it."
-                        },
-                        {
-                            "id": "7.4",
-                            "title": "Provisional Ball",
-                            "content": "If a ball might be lost outside a penalty area or out of bounds, the player may play a provisional ball to save time."
-                        }
-                    ]
-                },
-                {
-                    "id": "8",
-                    "title": "Playing the Ball",
-                    "rules": [
-                        {
-                            "id": "8.1",
-                            "title": "Actions That Improve Conditions",
-                            "content": "A player must not improve the conditions affecting the stroke by moving, bending or breaking anything growing or fixed, creating or eliminating irregularities of surface, removing or pressing down sand or loose soil, or removing dew, frost or water."
-                        },
-                        {
-                            "id": "8.2",
-                            "title": "Actions That Worsen Conditions",
-                            "content": "If a player or someone else worsens the conditions affecting the stroke, the player may restore them if possible."
-                        },
-                        {
-                            "id": "8.3",
-                            "title": "Ball Moving During Backswing or Stroke",
-                            "content": "If a player's ball at rest moves after the player has begun the backswing for a stroke and the stroke is made, the ball must be played as it lies."
-                        }
-                    ]
-                },
-                {
-                    "id": "9",
-                    "title": "Ball Played as It Lies",
-                    "rules": [
-                        {
-                            "id": "9.1",
-                            "title": "Ball Played as It Lies",
-                            "content": "A ball must be played as it lies, except when the Rules allow or require the player to play from a different place or lift the ball."
-                        },
-                        {
-                            "id": "9.2",
-                            "title": "Deciding Point Where Ball Came to Rest",
-                            "content": "If the exact spot where a ball came to rest is not known, the player must use their reasonable judgment to determine the spot."
-                        },
-                        {
-                            "id": "9.3",
-                            "title": "Ball Lifted or Moved by Outside Influence",
-                            "content": "If it is known or virtually certain that an outside influence lifted or moved a player's ball, there is no penalty and the ball must be replaced."
-                        },
-                        {
-                            "id": "9.4",
-                            "title": "Ball Moved by Player",
-                            "content": "If the player lifts or deliberately touches their ball at rest or causes it to move, the player gets one penalty stroke. The ball must be replaced."
-                        }
-                    ]
-                },
-                {
-                    "id": "10",
-                    "title": "Preparing and Making a Stroke",
-                    "rules": [
-                        {
-                            "id": "10.1",
-                            "title": "Making a Stroke",
-                            "content": "A stroke is made by fairly striking the ball with the head of the club. The player must not push, scrape or scoop the ball."
-                        },
-                        {
-                            "id": "10.2",
-                            "title": "Advice and Other Help",
-                            "content": "During a round, a player must not give advice to anyone in the competition, ask anyone for advice except their caddie, or touch another player's equipment to learn information."
-                        },
-                        {
-                            "id": "10.3",
-                            "title": "Caddies",
-                            "content": "A player may get help from a caddie. The caddie may carry clubs, give advice, search for the ball, and take other actions as allowed by the Rules."
-                        }
-                    ]
-                },
-                {
-                    "id": "11",
-                    "title": "Ball in Motion",
-                    "rules": [
-                        {
-                            "id": "11.1",
-                            "title": "Ball in Motion Accidentally Hits Person or Outside Influence",
-                            "content": "If a ball in motion accidentally hits any person or outside influence, there is no penalty to any player. The ball must be played as it lies."
-                        },
-                        {
-                            "id": "11.2",
-                            "title": "Ball in Motion Deliberately Deflected or Stopped",
-                            "content": "If any person deliberately deflects or stops a ball in motion, the Rules determine where the ball must be played from."
-                        },
-                        {
-                            "id": "11.3",
-                            "title": "Deliberately Moving Objects to Affect Ball in Motion",
-                            "content": "A player must not deliberately move an object or take any action to affect where a ball in motion might come to rest."
-                        }
-                    ]
-                },
-                {
-                    "id": "12",
-                    "title": "Bunkers",
-                    "rules": [
-                        {
-                            "id": "12.1",
-                            "title": "When Ball Is in Bunker",
-                            "content": "A ball is in a bunker when any part of the ball touches sand on the ground inside the edge of the bunker or is inside the edge and resting on or in anything else."
-                        },
-                        {
-                            "id": "12.2",
-                            "title": "Playing Ball in Bunker",
-                            "content": "Before making a stroke at a ball in a bunker, a player must not touch sand in the bunker with a hand or club, except that the player may rest the club lightly on the sand."
-                        },
-                        {
-                            "id": "12.3",
-                            "title": "Relief When Ball in Bunker Is Unplayable",
-                            "content": "If a ball is unplayable in a bunker, the player may take unplayable ball relief, with options including back-on-the-line relief outside the bunker for 2 penalty strokes."
-                        }
-                    ]
-                },
-                {
-                    "id": "13",
-                    "title": "Putting Greens",
-                    "rules": [
-                        {
-                            "id": "13.1",
-                            "title": "When Ball Is on Putting Green",
-                            "content": "A ball is on the putting green when any part of the ball touches the putting green or lies on or in anything inside the edge of the putting green."
-                        },
-                        {
-                            "id": "13.2",
-                            "title": "Marking, Lifting and Cleaning Ball",
-                            "content": "A ball on the putting green may be lifted and cleaned. The spot must be marked before lifting."
-                        },
-                        {
-                            "id": "13.3",
-                            "title": "Improvements Allowed on Putting Green",
-                            "content": "On the putting green, the player may repair damage and remove sand and loose soil."
-                        },
-                        {
-                            "id": "13.4",
-                            "title": "Attending or Removing Flagstick",
-                            "content": "The player may leave the flagstick in the hole, have it removed, or have someone attend it."
-                        }
-                    ]
-                },
-                {
-                    "id": "14",
-                    "title": "Procedures for Ball",
-                    "rules": [
-                        {
-                            "id": "14.1",
-                            "title": "Marking, Lifting and Cleaning Ball",
-                            "content": "Before lifting a ball that must be replaced, the player must mark the spot. The player may clean the ball when lifting it except when lifting to see if it is cut or cracked, to identify it, or because it interferes with play."
-                        },
-                        {
-                            "id": "14.2",
-                            "title": "Replacing Ball on Spot",
-                            "content": "A ball that was lifted or moved and must be replaced must be placed on its original spot."
-                        },
-                        {
-                            "id": "14.3",
-                            "title": "Dropping Ball in Relief Area",
-                            "content": "When taking relief, the player must drop the ball in the relief area by holding the ball at knee height and dropping it straight down."
-                        }
-                    ]
-                },
-                {
-                    "id": "15",
-                    "title": "Relief from Loose Impediments and Movable Obstructions",
-                    "rules": [
-                        {
-                            "id": "15.1",
-                            "title": "Loose Impediments",
-                            "content": "A player may remove any loose impediment anywhere on or off the course, and may do so in any manner. If the ball moves as a result, there is generally a one-stroke penalty."
-                        },
-                        {
-                            "id": "15.2",
-                            "title": "Movable Obstructions",
-                            "content": "A player may remove a movable obstruction anywhere on or off the course and may do so in any manner."
-                        }
-                    ]
-                },
-                {
-                    "id": "16",
-                    "title": "Relief from Abnormal Course Conditions",
-                    "rules": [
-                        {
-                            "id": "16.1",
-                            "title": "Abnormal Course Conditions",
-                            "content": "Free relief is allowed when an abnormal course condition (animal hole, ground under repair, immovable obstruction, or temporary water) interferes with the player's lie, stance, or area of intended swing."
-                        },
-                        {
-                            "id": "16.2",
-                            "title": "Dangerous Animal Condition",
-                            "content": "A player may take relief from a dangerous animal condition even without interference with the player's lie or stance."
-                        }
-                    ]
-                },
-                {
-                    "id": "17",
-                    "title": "Penalty Areas",
-                    "rules": [
-                        {
-                            "id": "17.1",
-                            "title": "Options for Ball in Penalty Area",
-                            "content": "Penalty areas are marked red (lateral) or yellow. When a ball is in a penalty area, the player may play it as it lies or take penalty relief under Rule 17.1."
-                        },
-                        {
-                            "id": "17.2",
-                            "title": "Relief Options for Ball in Penalty Area",
-                            "content": "With one penalty stroke, the player may take stroke-and-distance relief, back-on-the-line relief, or (for red penalty areas) lateral relief."
-                        }
-                    ]
-                },
-                {
-                    "id": "18",
-                    "title": "Stroke-and-Distance Relief, Lost Ball, Out of Bounds",
-                    "rules": [
-                        {
-                            "id": "18.1",
-                            "title": "Relief Under Penalty of Stroke and Distance",
-                            "content": "At any time, a player may take stroke-and-distance relief by adding one penalty stroke and playing from where the previous stroke was made."
-                        },
-                        {
-                            "id": "18.2",
-                            "title": "Ball Lost or Out of Bounds",
-                            "content": "If a ball is lost or out of bounds, the player must take stroke-and-distance relief by adding one penalty stroke and playing from where the previous stroke was made."
-                        },
-                        {
-                            "id": "18.3",
-                            "title": "Provisional Ball",
-                            "content": "To save time, a player who thinks the ball might be lost or out of bounds may play a provisional ball."
-                        }
-                    ]
-                },
-                {
-                    "id": "19",
-                    "title": "Unplayable Ball",
-                    "rules": [
-                        {
-                            "id": "19.1",
-                            "title": "Player May Decide Ball Is Unplayable",
-                            "content": "A player is the only person who may decide to treat their ball as unplayable. The ball may be declared unplayable anywhere on the course except in a penalty area."
-                        },
-                        {
-                            "id": "19.2",
-                            "title": "Relief Options for Unplayable Ball",
-                            "content": "With one penalty stroke, the player has three options: stroke-and-distance relief, back-on-the-line relief, or lateral relief within two club-lengths."
-                        }
-                    ]
-                },
-                {
-                    "id": "20",
-                    "title": "Resolving Rules Issues",
-                    "rules": [
-                        {
-                            "id": "20.1",
-                            "title": "Resolving Issues During Round",
-                            "content": "Players should resolve any Rules issues with the opponent (match play) or with the Committee (stroke play)."
-                        },
-                        {
-                            "id": "20.2",
-                            "title": "Rulings on Issues Under the Rules",
-                            "content": "Players may request a ruling from the Committee. In match play, players may agree how to decide a Rules issue."
-                        }
-                    ]
-                }
-            ]
-        }
+        """Load the rulebook from PDF."""
+        return PDFRulebook(RULEBOOK_PDF)
+    
+    def is_rulebook_available(self):
+        """Check if rulebook PDF is loaded."""
+        return self.rulebook.is_available()
 
     def get_rulebook(self):
-        """Return the current rulebook."""
+        """Return the rulebook object."""
         return self.rulebook
 
     def get_rulebook_version(self):
         """Return the rulebook version info."""
-        return {
-            "version": self.rulebook.get("version", "Unknown"),
-            "last_updated": self.rulebook.get("last_updated", "Unknown")
-        }
+        return self.rulebook.get_version()
 
     def search_rulebook(self, query):
         """
         Search the rulebook for rules matching the query.
         Returns list of matching rules with section info.
         """
-        query = query.lower()
-        results = []
-
-        for section in self.rulebook.get("sections", []):
-            for rule in section.get("rules", []):
-                # Search in rule ID, title, and content
-                if (query in rule.get("id", "").lower() or
-                    query in rule.get("title", "").lower() or
-                    query in rule.get("content", "").lower()):
-                    results.append({
-                        "section_id": section["id"],
-                        "section_title": section["title"],
-                        "rule_id": rule["id"],
-                        "rule_title": rule["title"],
-                        "content": rule["content"]
-                    })
-
-        return results
+        return self.rulebook.search(query)
+    
+    def search_rulebook_pages(self, query):
+        """
+        Search PDF pages directly for the query.
+        Returns list of page matches with snippets.
+        """
+        return self.rulebook.search_pdf_pages(query)
 
     def get_rule_by_id(self, rule_id):
         """Get a specific rule by its ID."""
-        for section in self.rulebook.get("sections", []):
-            for rule in section.get("rules", []):
-                if rule.get("id") == rule_id:
-                    return {
-                        "section_id": section["id"],
-                        "section_title": section["title"],
-                        "rule": rule
-                    }
-        return None
+        return self.rulebook.get_rule_by_id(rule_id)
 
     def get_all_sections(self):
         """Return list of all sections for navigation."""
-        return [(s["id"], s["title"]) for s in self.rulebook.get("sections", [])]
+        return [(s[0], s[1]) for s in self.rulebook.get_all_sections()]
+    
+    def get_all_sections_with_pages(self):
+        """Return list of all sections with page numbers."""
+        return self.rulebook.get_all_sections()
 
     def get_section_rules(self, section_id):
         """Get all rules in a specific section."""
-        for section in self.rulebook.get("sections", []):
-            if section["id"] == section_id:
-                return section.get("rules", [])
-        return []
+        return self.rulebook.get_section_rules(section_id)
+    
+    def get_page_content(self, page_num):
+        """Get the content of a specific PDF page."""
+        return self.rulebook.get_page_content(page_num)
+    
+    def get_total_pages(self):
+        """Get total number of pages in the rulebook."""
+        return self.rulebook.get_total_pages()
 
-    def update_rulebook(self, new_rulebook_data):
+    def set_rulebook_path(self, pdf_path):
         """
-        Update the rulebook with new data.
+        Change the rulebook PDF path.
         This allows for rulebook updates without code changes.
         """
-        self.rulebook = new_rulebook_data
-        self.rulebook["last_updated"] = datetime.now().strftime("%Y-%m-%d")
-        save_json(RULEBOOK_FILE, self.rulebook)
+        if os.path.exists(pdf_path):
+            # Close old PDF if open
+            if self.rulebook:
+                self.rulebook.close()
+            
+            # Copy to data directory
+            import shutil
+            shutil.copy(pdf_path, RULEBOOK_PDF)
+            
+            # Reload rulebook
+            self.rulebook = PDFRulebook(RULEBOOK_PDF)
+            self.rulebook.clear_cache()  # Force re-parsing
+            return True
+        return False
 
     def import_rulebook_from_file(self, filepath):
-        """Import a rulebook from a JSON file."""
+        """Import a rulebook from a PDF file."""
         try:
-            with open(filepath, 'r') as f:
-                new_rulebook = json.load(f)
-            self.update_rulebook(new_rulebook)
-            return True
+            return self.set_rulebook_path(filepath)
         except Exception as e:
             print(f"Error importing rulebook: {e}")
             return False

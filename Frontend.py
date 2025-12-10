@@ -1,6 +1,6 @@
 from datetime import datetime, date
 
-from Backend import GolfBackend, save_json, ROUNDS_FILE, generate_scorecard_data
+from Backend import GolfBackend, save_json, ROUNDS_FILE, generate_scorecard_data, PDF_AVAILABLE
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -939,13 +939,28 @@ class GolfApp:
         diff = rd['total_score'] - rd.get('par', 72)
         diff_str = f"+{diff}" if diff > 0 else str(diff)
 
+        holes_choice = rd.get("holes_choice", "full_18")
+        holes_played = rd.get("holes_played", 18)
+        if holes_choice == "front_9":
+            holes_text = "Front 9"
+        elif holes_choice == "back_9":
+            holes_text = "Back 9"
+        else:
+            holes_text = f"{holes_played} Holes"
+
         ttk.Label(frame, text=rd['course_name'], style="Title.TLabel").pack()
         ttk.Label(frame, text=f"{rd.get('date', 'N/A')}").pack()
-        ttk.Label(frame, text=f"Score: {rd['total_score']} ({diff_str})", font=("Helvetica", 14, "bold")).pack(pady=10)
+        ttk.Label(frame, text=f"Score: {rd['total_score']} ({diff_str})", font=("Helvetica", 14, "bold")).pack(pady=5)
+        ttk.Label(frame, text=f"Holes: {holes_text}", font=("Helvetica", 11)).pack(pady=(0, 10))
 
         info_frame = ttk.Frame(frame)
         info_frame.pack()
-        for i, line in enumerate([f"Target: {rd.get('target_score', 'N/A')}", f"Tee: {rd.get('tee_color', 'N/A')}", f"Type: {rd.get('round_type', 'solo').title()}", f"Serious: {'Yes' if rd['is_serious'] else 'No'}"]):
+        for i, line in enumerate([
+            f"Target: {rd.get('target_score', 'N/A')}",
+            f"Tee: {rd.get('tee_color', 'N/A')}",
+            f"Type: {rd.get('round_type', 'solo').title()}",
+            f"Serious: {'Yes' if rd['is_serious'] else 'No'}"
+        ]):
             ttk.Label(info_frame, text=line).grid(row=i//2, column=i%2, padx=10, sticky='w')
 
         ttk.Label(frame, text="Hole-by-Hole", style="Header.TLabel").pack(pady=(15, 5))
@@ -953,34 +968,90 @@ class GolfApp:
         table_frame = ttk.Frame(frame)
         table_frame.pack()
 
+        # Build pars and yardages
         pars = course["pars"] if course else [4] * len(rd["scores"])
         yardages = course.get("yardages", {}).get(rd.get("tee_color", ""), []) if course else []
-        has_yardages = yardages and any(y > 0 for y in yardages)
+        has_yardages = bool(yardages and any(y > 0 for y in yardages))
 
-        for i in range(min(9, len(rd["scores"]))):
-            ttk.Label(table_frame, text=str(i+1), width=4, relief='ridge').grid(row=0, column=i)
-            ttk.Label(table_frame, text=str(pars[i]), width=4, relief='ridge').grid(row=1, column=i)
-            if has_yardages and i < len(yardages):
-                ttk.Label(table_frame, text=str(yardages[i]) if yardages[i] > 0 else "-", width=4, relief='ridge').grid(row=2, column=i)
-            sc = rd["scores"][i]
-            ttk.Label(table_frame, text=str(sc) if sc else "-", width=4, relief='ridge').grid(row=3 if has_yardages else 2, column=i)
+        # Determine which holes to show based on holes_choice
+        scores = rd["scores"]
+        n_scores = len(scores)
 
-        ttk.Label(table_frame, text="Hole").grid(row=0, column=9, padx=5)
-        ttk.Label(table_frame, text="Par").grid(row=1, column=9, padx=5)
-        if has_yardages:
-            ttk.Label(table_frame, text="Yds").grid(row=2, column=9, padx=5)
-        ttk.Label(table_frame, text="Score").grid(row=3 if has_yardages else 2, column=9, padx=5)
+        if holes_choice == "front_9":
+            start_idx = 0
+            end_idx = min(9, n_scores)
+        elif holes_choice == "back_9":
+            # Prefer the classic back 9 (10–18) if available
+            if n_scores >= 18:
+                start_idx = 9
+                end_idx = 18
+            else:
+                # Fallback: last 9 holes of whatever we have
+                start_idx = max(0, n_scores - 9)
+                end_idx = n_scores
+        else:  # full_18 or unknown → show everything we have
+            start_idx = 0
+            end_idx = n_scores
 
-        if len(rd["scores"]) > 9:
-            base_row = 4 if has_yardages else 3
-            for i in range(9, len(rd["scores"])):
-                col = i - 9
-                ttk.Label(table_frame, text=str(i+1), width=4, relief='ridge').grid(row=base_row, column=col)
-                ttk.Label(table_frame, text=str(pars[i]), width=4, relief='ridge').grid(row=base_row+1, column=col)
-                if has_yardages and i < len(yardages):
-                    ttk.Label(table_frame, text=str(yardages[i]) if yardages[i] > 0 else "-", width=4, relief='ridge').grid(row=base_row+2, column=col)
-                sc = rd["scores"][i]
-                ttk.Label(table_frame, text=str(sc) if sc else "-", width=4, relief='ridge').grid(row=base_row+3 if has_yardages else base_row+2, column=col)
+        holes_indices = list(range(start_idx, end_idx))
+
+        if not holes_indices:
+            ttk.Label(table_frame, text="No hole-by-hole data available.").pack()
+        else:
+            # Row labels
+            ttk.Label(table_frame, text="Hole", width=6, relief='ridge').grid(row=0, column=0, padx=1)
+            ttk.Label(table_frame, text="Par", width=6, relief='ridge').grid(row=1, column=0, padx=1)
+            if has_yardages:
+                ttk.Label(table_frame, text="Yds", width=6, relief='ridge').grid(row=2, column=0, padx=1)
+            ttk.Label(
+                table_frame,
+                text="Score",
+                width=6,
+                relief='ridge'
+            ).grid(row=3 if has_yardages else 2, column=0, padx=1)
+
+            # Hole numbers
+            for col, hole_idx in enumerate(holes_indices, start=1):
+                ttk.Label(
+                    table_frame,
+                    text=str(hole_idx + 1),
+                    width=4,
+                    relief='ridge'
+                ).grid(row=0, column=col)
+
+            # Par row
+            for col, hole_idx in enumerate(holes_indices, start=1):
+                par_val = pars[hole_idx] if hole_idx < len(pars) else 4
+                ttk.Label(
+                    table_frame,
+                    text=str(par_val),
+                    width=4,
+                    relief='ridge'
+                ).grid(row=1, column=col)
+
+            # Yardages row (optional)
+            if has_yardages:
+                for col, hole_idx in enumerate(holes_indices, start=1):
+                    yds = yardages[hole_idx] if hole_idx < len(yardages) else 0
+                    y_text = str(yds) if yds > 0 else "-"
+                    ttk.Label(
+                        table_frame,
+                        text=y_text,
+                        width=4,
+                        relief='ridge'
+                    ).grid(row=2, column=col)
+
+            # Scores row
+            score_row = 3 if has_yardages else 2
+            for col, hole_idx in enumerate(holes_indices, start=1):
+                sc = scores[hole_idx] if hole_idx < len(scores) else None
+                s_text = str(sc) if sc is not None else "-"
+                ttk.Label(
+                    table_frame,
+                    text=s_text,
+                    width=4,
+                    relief='ridge'
+                ).grid(row=score_row, column=col)
 
         if rd.get("notes"):
             ttk.Label(frame, text="Notes:", style="Header.TLabel").pack(pady=(15, 5))
@@ -990,36 +1061,55 @@ class GolfApp:
         btn_frame.pack(pady=15)
         ttk.Button(btn_frame, text="Export", command=lambda: self.show_export_dialog(rd)).pack(side='left', padx=5)
         ttk.Button(btn_frame, text="Close", command=win.destroy).pack(side='left', padx=5)
+
     def open_rulebook(self):
         self.rulebook_window = tk.Toplevel(self.root)
         self.rulebook_window.title("📖 USGA/PGA Rulebook")
-        self.rulebook_window.geometry("700x600")
+        self.rulebook_window.geometry("800x650")
 
         main_frame = ttk.Frame(self.rulebook_window)
         main_frame.pack(fill='both', expand=True, padx=10, pady=10)
 
+        # Header with version info and PDF status
         header_frame = ttk.Frame(main_frame)
         header_frame.pack(fill='x')
 
         version_info = self.backend.get_rulebook_version()
         ttk.Label(header_frame, text="📖 Rules of Golf", style="Title.TLabel").pack(side='left')
-        ttk.Label(header_frame, text=f"Version: {version_info['version']}", font=("Helvetica", 9)).pack(side='right')
+        
+        # Show PDF status
+        status_frame = ttk.Frame(header_frame)
+        status_frame.pack(side='right')
+        ttk.Label(status_frame, text=f"Version: {version_info['version']}", font=("Helvetica", 9)).pack(side='left', padx=5)
+        
+        if self.backend.is_rulebook_available():
+            total_pages = self.backend.get_total_pages()
+            ttk.Label(status_frame, text=f"({total_pages} pages)", font=("Helvetica", 9), foreground='green').pack(side='left')
+        else:
+            ttk.Label(status_frame, text="(PDF not loaded)", font=("Helvetica", 9), foreground='red').pack(side='left')
 
+        # Search frame with enhanced options
         search_frame = ttk.LabelFrame(main_frame, text="Search Rules", padding=10)
         search_frame.pack(fill='x', pady=10)
 
+        search_row1 = ttk.Frame(search_frame)
+        search_row1.pack(fill='x')
+        
         self.rule_search_var = tk.StringVar()
-        search_entry = ttk.Entry(search_frame, textvariable=self.rule_search_var, width=40)
+        search_entry = ttk.Entry(search_row1, textvariable=self.rule_search_var, width=40)
         search_entry.pack(side='left', padx=(0, 10))
         search_entry.bind('<Return>', lambda e: self.search_rules())
 
-        ttk.Button(search_frame, text="🔍 Search", command=self.search_rules).pack(side='left')
-        ttk.Button(search_frame, text="📑 Bookmarks", command=self.show_bookmarks).pack(side='left', padx=10)
-        ttk.Button(search_frame, text="📝 My Notes", command=self.show_all_notes).pack(side='left')
+        ttk.Button(search_row1, text="🔍 Search Rules", command=self.search_rules).pack(side='left')
+        ttk.Button(search_row1, text="📄 Search Pages", command=self.search_pdf_pages).pack(side='left', padx=5)
+        ttk.Button(search_row1, text="📑 Bookmarks", command=self.show_bookmarks).pack(side='left', padx=10)
+        ttk.Button(search_row1, text="📝 My Notes", command=self.show_all_notes).pack(side='left')
 
+        # Paned window for navigation and content
         paned = ttk.PanedWindow(main_frame, orient='horizontal')
         paned.pack(fill='both', expand=True, pady=10)
 
+        # Navigation frame with sections
         nav_frame = ttk.LabelFrame(paned, text="Sections", padding=5)
         self.section_tree = ttk.Treeview(nav_frame, show="tree", height=20)
         nav_scroll = ttk.Scrollbar(nav_frame, orient='vertical', command=self.section_tree.yview)
@@ -1028,25 +1118,64 @@ class GolfApp:
         nav_scroll.pack(side='right', fill='y')
         self.section_tree.bind('<<TreeviewSelect>>', self.on_section_select)
 
-        for section_id, section_title in self.backend.get_all_sections():
-            self.section_tree.insert("", "end", iid=section_id, text=f"{section_id}. {section_title}")
+        # Load sections from PDF
+        sections = self.backend.get_all_sections()
+        if sections:
+            for section_id, section_title in sections:
+                self.section_tree.insert("", "end", iid=section_id, text=f"Rule {section_id}: {section_title}")
+        else:
+            self.section_tree.insert("", "end", iid="no_sections", text="No sections found - Import PDF")
 
         paned.add(nav_frame, weight=1)
 
+        # Content frame
         content_frame = ttk.LabelFrame(paned, text="Rule Details", padding=5)
-        self.rule_content = tk.Text(content_frame, wrap='word', height=25, width=50)
+        self.rule_content = tk.Text(content_frame, wrap='word', height=25, width=55)
         content_scroll = ttk.Scrollbar(content_frame, orient='vertical', command=self.rule_content.yview)
         self.rule_content.configure(yscrollcommand=content_scroll.set)
         self.rule_content.pack(side='left', fill='both', expand=True)
         content_scroll.pack(side='right', fill='y')
         paned.add(content_frame, weight=2)
 
+        # Bottom button frame
         btn_frame = ttk.Frame(main_frame)
         btn_frame.pack(fill='x', pady=10)
-        ttk.Button(btn_frame, text="Import New Rulebook", command=self.import_rulebook).pack(side='left')
+        
+        ttk.Button(btn_frame, text="📥 Import PDF Rulebook", command=self.import_rulebook).pack(side='left')
+        
+        # Page browser button (only if PDF available)
+        if self.backend.is_rulebook_available():
+            ttk.Button(btn_frame, text="📖 Browse Pages", command=self.open_page_browser).pack(side='left', padx=10)
+        
         ttk.Button(btn_frame, text="Close", command=self.rulebook_window.destroy).pack(side='right')
 
-        self.rule_content.insert('1.0', "Welcome to the Rules of Golf!\n\nSelect a section from the left panel to browse rules, or use the search box to find specific rules.\n\nFeatures:\n• Search across all rules\n• Bookmark important rules\n• Add personal notes to rules\n• Import updated rulebook versions")
+        # Welcome message
+        welcome_text = """Welcome to the Rules of Golf!
+
+This rulebook viewer reads directly from the official PDF.
+
+FEATURES:
+• Browse by rule sections (left panel)
+• Search across all rules
+• Search specific PDF pages
+• Bookmark important rules
+• Add personal notes to rules
+• Import updated rulebook PDF versions
+
+"""
+        if not self.backend.is_rulebook_available():
+            welcome_text += """⚠️ NO PDF LOADED
+Click 'Import PDF Rulebook' to load your Rules of Golf PDF.
+Place the PDF at: data/2023_Rules_of_Golf.pdf
+
+Or use the import button below."""
+        else:
+            welcome_text += f"""✅ PDF Loaded: {version_info['version']} Rules of Golf
+Total Pages: {self.backend.get_total_pages()}
+
+Select a section from the left to get started!"""
+
+        self.rule_content.insert('1.0', welcome_text)
         self.rule_content.config(state='disabled')
 
     def search_rules(self):
@@ -1059,31 +1188,117 @@ class GolfApp:
         self.rule_content.delete('1.0', tk.END)
 
         if not results:
-            self.rule_content.insert('1.0', f"No results found for '{query}'")
+            self.rule_content.insert('1.0', f"No results found for '{query}'\n\nTry different keywords or use 'Search Pages' for direct PDF text search.")
         else:
             self.rule_content.insert('1.0', f"Search Results for '{query}' ({len(results)} found):\n\n")
             for result in results:
                 is_bookmarked = "★ " if self.backend.is_bookmarked(result['rule_id']) else ""
-                self.rule_content.insert(tk.END, f"{is_bookmarked}Rule {result['rule_id']}: {result['rule_title']}\nSection: {result['section_title']}\n\n{result['content'][:300]}{'...' if len(result['content']) > 300 else ''}\n\n" + "─" * 50 + "\n\n")
+                page_info = f" (Page {result.get('page', '?') + 1})" if result.get('page') else ""
+                self.rule_content.insert(tk.END, f"{is_bookmarked}Rule {result['rule_id']}: {result['rule_title']}{page_info}\nSection: {result['section_title']}\n\n{result['content'][:300]}{'...' if len(result['content']) > 300 else ''}\n\n" + "─" * 50 + "\n\n")
 
         self.rule_content.config(state='disabled')
 
+    def search_pdf_pages(self):
+        """Search PDF pages directly and show results with page numbers."""
+        query = self.rule_search_var.get().strip()
+        if not query:
+            return messagebox.showwarning("Warning", "Enter a search term")
+
+        if not self.backend.is_rulebook_available():
+            return messagebox.showwarning("Warning", "PDF rulebook not loaded. Import a PDF first.")
+
+        results = self.backend.search_rulebook_pages(query)
+        self.rule_content.config(state='normal')
+        self.rule_content.delete('1.0', tk.END)
+
+        if not results:
+            self.rule_content.insert('1.0', f"No page matches found for '{query}'")
+        else:
+            self.rule_content.insert('1.0', f"Page Search Results for '{query}' ({len(results)} matches):\n\n")
+            for result in results:
+                self.rule_content.insert(tk.END, f"📄 Page {result['page']}:\n{result['snippet']}\n\n" + "─" * 50 + "\n\n")
+
+        self.rule_content.config(state='disabled')
+
+    def open_page_browser(self):
+        """Open a window to browse PDF pages directly."""
+        if not self.backend.is_rulebook_available():
+            return messagebox.showwarning("Warning", "PDF rulebook not loaded.")
+        
+        browser = tk.Toplevel(self.rulebook_window)
+        browser.title("📖 Page Browser")
+        browser.geometry("600x500")
+        
+        frame = ttk.Frame(browser, padding=10)
+        frame.pack(fill='both', expand=True)
+        
+        # Navigation bar
+        nav_frame = ttk.Frame(frame)
+        nav_frame.pack(fill='x', pady=(0, 10))
+        
+        total_pages = self.backend.get_total_pages()
+        current_page = tk.IntVar(value=1)
+        
+        ttk.Label(nav_frame, text="Page:").pack(side='left')
+        page_spin = ttk.Spinbox(nav_frame, from_=1, to=total_pages, textvariable=current_page, width=6)
+        page_spin.pack(side='left', padx=5)
+        ttk.Label(nav_frame, text=f"of {total_pages}").pack(side='left')
+        
+        def go_to_page():
+            page_num = current_page.get() - 1  # Convert to 0-indexed
+            content = self.backend.get_page_content(page_num)
+            page_text.config(state='normal')
+            page_text.delete('1.0', tk.END)
+            page_text.insert('1.0', f"Page {current_page.get()}\n" + "─" * 40 + "\n\n")
+            page_text.insert(tk.END, content)
+            page_text.config(state='disabled')
+        
+        def prev_page():
+            if current_page.get() > 1:
+                current_page.set(current_page.get() - 1)
+                go_to_page()
+        
+        def next_page():
+            if current_page.get() < total_pages:
+                current_page.set(current_page.get() + 1)
+                go_to_page()
+        
+        ttk.Button(nav_frame, text="◀ Prev", command=prev_page).pack(side='left', padx=10)
+        ttk.Button(nav_frame, text="Go", command=go_to_page).pack(side='left')
+        ttk.Button(nav_frame, text="Next ▶", command=next_page).pack(side='left', padx=10)
+        
+        # Page content
+        page_text = tk.Text(frame, wrap='word', height=25, width=70)
+        scroll = ttk.Scrollbar(frame, orient='vertical', command=page_text.yview)
+        page_text.configure(yscrollcommand=scroll.set)
+        page_text.pack(side='left', fill='both', expand=True)
+        scroll.pack(side='right', fill='y')
+        
+        page_text.insert('1.0', "Use the navigation above to browse pages.\n\nClick 'Go' to view a specific page.")
+        page_text.config(state='disabled')
+        
+        ttk.Button(frame, text="Close", command=browser.destroy).pack(pady=10)
+
     def on_section_select(self, event):
         selection = self.section_tree.selection()
-        if not selection:
+        if not selection or selection[0] == "no_sections":
             return
 
         rules = self.backend.get_section_rules(selection[0])
         self.rule_content.config(state='normal')
         self.rule_content.delete('1.0', tk.END)
 
-        for rule in rules:
-            is_bookmarked = "★ " if self.backend.is_bookmarked(rule['id']) else ""
-            user_notes = self.backend.get_rule_notes(rule['id'])
-            self.rule_content.insert(tk.END, f"{is_bookmarked}Rule {rule['id']}: {rule['title']}\n\n{rule['content']}\n")
-            if user_notes:
-                self.rule_content.insert(tk.END, f"\n📝 My Notes: {user_notes}\n")
-            self.rule_content.insert(tk.END, "\n" + "─" * 50 + "\n\n")
+        if not rules:
+            self.rule_content.insert('1.0', f"No detailed rules found for section {selection[0]}.\n\nTry using the 'Search Pages' button to find content directly in the PDF.")
+        else:
+            for rule in rules:
+                is_bookmarked = "★ " if self.backend.is_bookmarked(rule['id']) else ""
+                user_notes = self.backend.get_rule_notes(rule['id'])
+                page_info = f" (Page {rule.get('page', 0) + 1})" if rule.get('page') else ""
+                self.rule_content.insert(tk.END, f"{is_bookmarked}Rule {rule['id']}: {rule['title']}{page_info}\n\n{rule['content']}\n")
+                if user_notes:
+                    self.rule_content.insert(tk.END, f"\n📝 My Notes: {user_notes}\n")
+                self.rule_content.insert(tk.END, "\n" + "─" * 50 + "\n\n")
 
         self.rule_content.config(state='disabled')
 
@@ -1145,17 +1360,35 @@ class GolfApp:
         ttk.Button(frame, text="Close", command=win.destroy).pack(pady=10)
 
     def import_rulebook(self):
-        filepath = filedialog.askopenfilename(filetypes=[("JSON files", "*.json")], title="Select Rulebook JSON File")
+        filepath = filedialog.askopenfilename(
+            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")], 
+            title="Select Rules of Golf PDF File"
+        )
         if not filepath:
             return
+        
         if self.backend.import_rulebook_from_file(filepath):
-            messagebox.showinfo("Success", "Rulebook imported successfully!")
+            messagebox.showinfo("Success", "Rulebook PDF imported successfully!\n\nThe PDF will be parsed and indexed for searching.")
+            
+            # Refresh the section tree
             for item in self.section_tree.get_children():
                 self.section_tree.delete(item)
-            for section_id, section_title in self.backend.get_all_sections():
-                self.section_tree.insert("", "end", iid=section_id, text=f"{section_id}. {section_title}")
+            
+            sections = self.backend.get_all_sections()
+            if sections:
+                for section_id, section_title in sections:
+                    self.section_tree.insert("", "end", iid=section_id, text=f"Rule {section_id}: {section_title}")
+            else:
+                self.section_tree.insert("", "end", iid="no_sections", text="No sections found")
+            
+            # Update welcome message
+            version_info = self.backend.get_rulebook_version()
+            self.rule_content.config(state='normal')
+            self.rule_content.delete('1.0', tk.END)
+            self.rule_content.insert('1.0', f"✅ PDF Imported Successfully!\n\nVersion: {version_info['version']}\nPages: {self.backend.get_total_pages()}\n\nSelect a section from the left to get started!")
+            self.rule_content.config(state='disabled')
         else:
-            messagebox.showerror("Error", "Failed to import rulebook. Check the file format.")
+            messagebox.showerror("Error", "Failed to import rulebook PDF.\n\nMake sure the file is a valid PDF.")
 
     def open_club_distances(self):
         self.clubs_window = tk.Toplevel(self.root)
