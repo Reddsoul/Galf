@@ -1,31 +1,22 @@
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
 from datetime import datetime, date
+
 from Backend import GolfBackend, save_json, ROUNDS_FILE, generate_scorecard_data
 
-# Try importing tkcalendar for date picker
-try:
-    from tkcalendar import DateEntry
-    TKCALENDAR_AVAILABLE = True
-except ImportError:
-    TKCALENDAR_AVAILABLE = False
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
 
-# Optional imports for export functionality
-try:
-    from reportlab.lib.pagesizes import letter, landscape
-    from reportlab.lib import colors
-    from reportlab.lib.units import inch
-    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    REPORTLAB_AVAILABLE = True
-except ImportError:
-    REPORTLAB_AVAILABLE = False
+from tkcalendar import DateEntry
 
-try:
-    from PIL import Image, ImageDraw, ImageFont
-    PIL_AVAILABLE = True
-except ImportError:
-    PIL_AVAILABLE = False
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter, landscape
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+
+from PIL import Image, ImageDraw, ImageFont
+
+
+REPORTLAB_AVAILABLE = True
+PIL_AVAILABLE = True
 
 
 class GolfApp:
@@ -408,14 +399,10 @@ class GolfApp:
 
         # DATE PICKER
         ttk.Label(frame, text="Date:").grid(row=4, column=0, sticky='e', pady=5)
-        if TKCALENDAR_AVAILABLE:
-            self.date_entry = DateEntry(frame, width=23, date_pattern='yyyy-mm-dd', maxdate=date.today())
-            self.date_entry.grid(row=4, column=1, pady=5, sticky='w')
-        else:
-            self.date_entry = ttk.Entry(frame, width=25)
-            self.date_entry.insert(0, date.today().strftime("%Y-%m-%d"))
-            self.date_entry.grid(row=4, column=1, pady=5, sticky='w')
-            ttk.Label(frame, text="(YYYY-MM-DD)", font=("Helvetica", 8)).grid(row=4, column=1, sticky='e')
+
+        self.date_entry = DateEntry(frame, width=23, date_pattern='yyyy-mm-dd', maxdate=date.today())
+        self.date_entry.grid(row=4, column=1, pady=5, sticky='w')
+
 
         self.course_handicap_label = ttk.Label(frame, text="Course Handicap: N/A")
         self.course_handicap_label.grid(row=5, column=0, columnspan=2, pady=2)
@@ -494,14 +481,7 @@ class GolfApp:
         self.round_type = self.round_type_var.get()
         self.notes = self.notes_entry.get().strip()
         self.holes_choice = self.holes_choice_var.get()
-
-        if TKCALENDAR_AVAILABLE:
-            self.selected_date = self.date_entry.get_date()
-        else:
-            try:
-                self.selected_date = datetime.strptime(self.date_entry.get(), "%Y-%m-%d").date()
-            except ValueError:
-                return messagebox.showerror("Error", "Invalid date format. Use YYYY-MM-DD")
+        self.selected_date = self.date_entry.get_date()
 
         all_pars = self.selected_course["pars"]
         if self.holes_choice == "full_18":
