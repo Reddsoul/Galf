@@ -19,6 +19,8 @@ RULEBOOK_PDF = 'data/2023_Rules_of_Golf.pdf'  # Changed from JSON to PDF
 BOOKMARKS_FILE = 'data/bookmarks.json'
 RULE_NOTES_FILE = 'data/rule_notes.json'
 RULEBOOK_CACHE_FILE = 'data/rulebook_cache.json'  # Cache for parsed structure
+PDF_ANNOTATIONS_FILE = 'data/pdf_annotations.json'  # Highlights and notes on PDF pages
+PAGE_BOOKMARKS_FILE = 'data/page_bookmarks.json'  # Bookmarked page numbers
 
 
 def load_json(filename):
@@ -86,6 +88,77 @@ class PDFRulebook:
         """Return total number of pages."""
         return len(self.doc) if self.is_available() else 0
     
+    def _parse_toc_from_pdf(self):
+        """
+        Parse the Table of Contents directly from the PDF pages 5-9.
+        Returns list of {'level': int, 'title': str, 'page': int} dicts.
+        """
+        if not self.is_available():
+            return []
+        
+        # Extract text from TOC pages (pages 5-9, 0-indexed: 4-8)
+        toc_text = ""
+        for page_num in range(4, 9):
+            if page_num < len(self.doc):
+                page = self.doc[page_num]
+                toc_text += page.get_text() + "\n"
+        
+        entries = []
+        lines = toc_text.split('\n')
+        i = 0
+        
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            # Skip empty lines, "Contents" header, and standalone page numbers
+            if not line or line == "Contents" or (line.isdigit() and len(line) <= 2):
+                i += 1
+                continue
+            
+            # Check if line contains backspace character (\b) followed by page number
+            # This is how the PDF encodes TOC entries
+            if '\b' in line:
+                parts = line.split('\b')
+                title = parts[0].strip()
+                page_str = parts[-1].strip() if len(parts) > 1 else ""
+                
+                # Page number might be on next line
+                if not page_str.isdigit() and i + 1 < len(lines):
+                    next_line = lines[i + 1].strip()
+                    if next_line.isdigit():
+                        page_str = next_line
+                        i += 1
+                
+                if title and page_str.isdigit():
+                    page_num = int(page_str)
+                    
+                    # Determine hierarchy level based on pattern
+                    level = 3  # Default: sub-rule (e.g., "1.1", "1.2")
+                    
+                    # Level 1: Parts (Roman numerals) and top-level items
+                    if re.match(r'^[IVX]+\.\s', title):
+                        level = 1
+                    elif title.startswith('Foreword') or title.startswith('Principal Changes') or \
+                         title.startswith('How to Use') or title == 'Index' or \
+                         title == 'Other Publications' or 'Definitions' in title:
+                        level = 1
+                    # Level 2: Rules
+                    elif re.match(r'^Rule\s+\d+', title):
+                        level = 2
+                    
+                    # Clean up title (normalize whitespace)
+                    title = re.sub(r'\s+', ' ', title).strip()
+                    
+                    entries.append({
+                        'level': level,
+                        'title': title,
+                        'page': page_num + 1  # Convert to 0-indexed for internal use
+                    })
+            
+            i += 1
+        
+        return entries
+    
     def _parse_structure(self):
         """Parse PDF to extract rule structure. Results are cached."""
         if self._cache is not None:
@@ -96,7 +169,6 @@ class PDFRulebook:
             try:
                 with open(RULEBOOK_CACHE_FILE, 'r') as f:
                     cached = json.load(f)
-                    # Verify cache is for same PDF (check modification time)
                     if cached.get('pdf_mtime') == os.path.getmtime(self.pdf_path):
                         self._cache = cached
                         return self._cache
@@ -104,117 +176,41 @@ class PDFRulebook:
                 pass
         
         if not self.is_available():
-            return {"sections": [], "rules": {}}
+            return {"toc": [], "sections": [], "rules": {}}
         
+        # Parse TOC directly from PDF
+        toc_entries = self._parse_toc_from_pdf()
+        
+        # Build TOC items with unique IDs
+        toc_items = []
         sections = []
-        rules = {}
         
-        # Patterns for rule detection
-        rule_heading_re = re.compile(r'^Rule\s+(\d+)\s*[–\-]\s*(.+)$', re.MULTILINE)
-        subrule_heading_re = re.compile(r'^(\d+\.\d+[a-z]?)\s+(.+)$', re.MULTILINE)
-        
-        full_text = ""
-        page_map = {}  # Map rule IDs to page numbers
-        
-        for page_num in range(len(self.doc)):
-            page_text = self.get_page_text(page_num)
-            start_pos = len(full_text)
-            full_text += page_text + "\n"
-            
-            # Track positions for page mapping
-            for match in rule_heading_re.finditer(page_text):
-                rule_id = match.group(1)
-                page_map[rule_id] = page_num
-            
-            for match in subrule_heading_re.finditer(page_text):
-                rule_id = match.group(1)
-                page_map[rule_id] = page_num
-        
-        # Parse main rules
-        current_section = None
-        current_rule_content = []
-        
-        for match in rule_heading_re.finditer(full_text):
-            rule_num = match.group(1)
-            title = match.group(2).strip()
-            
-            # Save previous section
-            if current_section:
-                sections.append(current_section)
-            
-            current_section = {
-                "id": rule_num,
-                "title": title,
-                "page": page_map.get(rule_num, 0),
-                "subrules": []
+        for i, entry in enumerate(toc_entries):
+            toc_item = {
+                "id": f"toc_{i}",
+                "level": entry['level'],
+                "title": entry['title'],
+                "page": entry['page']
             }
-        
-        # Add last section
-        if current_section:
-            sections.append(current_section)
-        
-        # Parse subrules and their content
-        lines = full_text.split('\n')
-        current_subrule = None
-        content_lines = []
-        
-        for line in lines:
-            line = line.strip()
-            if not line:
-                if current_subrule and content_lines:
-                    content_lines.append("")  # Preserve paragraph breaks
-                continue
+            toc_items.append(toc_item)
             
-            # Check for new subrule
-            sub_match = subrule_heading_re.match(line)
-            if sub_match:
-                # Save previous subrule
-                if current_subrule:
-                    current_subrule["content"] = "\n".join(content_lines).strip()
-                    rules[current_subrule["id"]] = current_subrule
-                
-                sub_id = sub_match.group(1)
-                sub_title = sub_match.group(2).strip()
-                
-                # Find parent section
-                section_id = sub_id.split('.')[0]
-                
-                current_subrule = {
-                    "id": sub_id,
-                    "title": sub_title,
-                    "section_id": section_id,
-                    "page": page_map.get(sub_id, 0)
-                }
-                content_lines = []
-                
-                # Add to section's subrules list
-                for sec in sections:
-                    if sec["id"] == section_id:
-                        sec["subrules"].append({"id": sub_id, "title": sub_title})
-                        break
-                continue
-            
-            # Regular content line
-            if current_subrule:
-                # Skip page numbers and headers
-                if line.isdigit() and len(line) <= 3:
-                    continue
-                if line.startswith("Rules of Golf"):
-                    continue
-                content_lines.append(line)
-        
-        # Save last subrule
-        if current_subrule:
-            current_subrule["content"] = "\n".join(content_lines).strip()
-            rules[current_subrule["id"]] = current_subrule
+            # Also add to sections for backward compatibility
+            if entry['level'] <= 2:
+                sections.append({
+                    "id": toc_item["id"],
+                    "title": entry['title'],
+                    "page": entry['page'],
+                    "level": entry['level']
+                })
         
         self._cache = {
+            "toc": toc_items,
             "sections": sections,
-            "rules": rules,
+            "rules": {},
             "pdf_mtime": os.path.getmtime(self.pdf_path)
         }
         
-        # Save cache to file
+        # Save cache
         try:
             os.makedirs(os.path.dirname(RULEBOOK_CACHE_FILE), exist_ok=True)
             with open(RULEBOOK_CACHE_FILE, 'w') as f:
@@ -224,10 +220,20 @@ class PDFRulebook:
         
         return self._cache
     
+    def get_toc(self):
+        """Return the full hierarchical table of contents parsed from the PDF."""
+        structure = self._parse_structure()
+        return structure.get("toc", [])
+    
     def get_all_sections(self):
+        """Return list of (section_id, section_title) tuples for backward compatibility."""
+        structure = self._parse_structure()
+        return [(s["id"], s["title"]) for s in structure.get("sections", [])]
+    
+    def get_all_sections_with_pages(self):
         """Return list of (section_id, section_title, page_num) tuples."""
         structure = self._parse_structure()
-        return [(s["id"], s["title"], s.get("page", 0)) for s in structure["sections"]]
+        return [(s["id"], s["title"], s.get("page", 0)) for s in structure.get("sections", [])]
     
     def get_section_rules(self, section_id):
         """Get all rules in a specific section."""
@@ -410,6 +416,28 @@ class GolfBackend:
         self.rulebook = self._load_rulebook()
         self.bookmarks = load_json(BOOKMARKS_FILE) if os.path.exists(BOOKMARKS_FILE) else []
         self.rule_notes = load_json(RULE_NOTES_FILE) if os.path.exists(RULE_NOTES_FILE) else {}
+        self.pdf_annotations = self._load_pdf_annotations()
+        self.page_bookmarks = self._load_page_bookmarks()
+    
+    def _load_pdf_annotations(self):
+        """Load PDF annotations (highlights, notes) from file."""
+        if os.path.exists(PDF_ANNOTATIONS_FILE):
+            try:
+                data = load_json(PDF_ANNOTATIONS_FILE)
+                return data if isinstance(data, dict) else {}
+            except:
+                return {}
+        return {}
+    
+    def _load_page_bookmarks(self):
+        """Load bookmarked page numbers from file."""
+        if os.path.exists(PAGE_BOOKMARKS_FILE):
+            try:
+                data = load_json(PAGE_BOOKMARKS_FILE)
+                return data if isinstance(data, list) else []
+            except:
+                return []
+        return []
 
     # ---- Courses ----
     def get_courses(self):
@@ -893,6 +921,66 @@ class GolfBackend:
     def get_all_notes(self):
         """Return all rules with notes."""
         return self.rule_notes
+
+    # ---- PDF Annotations (ForeFlight-style) ----
+    def get_pdf_annotations(self):
+        """Get all PDF annotations (highlights, notes by page)."""
+        return self.pdf_annotations
+    
+    def save_pdf_annotations(self, annotations):
+        """Save PDF annotations to file."""
+        self.pdf_annotations = annotations
+        save_json(PDF_ANNOTATIONS_FILE, annotations)
+    
+    def get_page_annotations(self, page_num):
+        """Get annotations for a specific page."""
+        return self.pdf_annotations.get(str(page_num), [])
+    
+    def add_page_annotation(self, page_num, annotation):
+        """Add an annotation to a specific page."""
+        page_key = str(page_num)
+        if page_key not in self.pdf_annotations:
+            self.pdf_annotations[page_key] = []
+        self.pdf_annotations[page_key].append(annotation)
+        save_json(PDF_ANNOTATIONS_FILE, self.pdf_annotations)
+    
+    def clear_page_annotations(self, page_num):
+        """Clear all annotations from a specific page."""
+        page_key = str(page_num)
+        if page_key in self.pdf_annotations:
+            del self.pdf_annotations[page_key]
+            save_json(PDF_ANNOTATIONS_FILE, self.pdf_annotations)
+
+    # ---- Page Bookmarks (ForeFlight-style) ----
+    def get_page_bookmarks(self):
+        """Get list of bookmarked page numbers."""
+        return self.page_bookmarks
+    
+    def save_page_bookmarks(self, bookmarks):
+        """Save page bookmarks to file."""
+        self.page_bookmarks = sorted(list(set(bookmarks)))
+        save_json(PAGE_BOOKMARKS_FILE, self.page_bookmarks)
+    
+    def add_page_bookmark(self, page_num):
+        """Add a page to bookmarks."""
+        if page_num not in self.page_bookmarks:
+            self.page_bookmarks.append(page_num)
+            self.page_bookmarks.sort()
+            save_json(PAGE_BOOKMARKS_FILE, self.page_bookmarks)
+            return True
+        return False
+    
+    def remove_page_bookmark(self, page_num):
+        """Remove a page from bookmarks."""
+        if page_num in self.page_bookmarks:
+            self.page_bookmarks.remove(page_num)
+            save_json(PAGE_BOOKMARKS_FILE, self.page_bookmarks)
+            return True
+        return False
+    
+    def is_page_bookmarked(self, page_num):
+        """Check if a page is bookmarked."""
+        return page_num in self.page_bookmarks
 
     # ---- Statistics ----
     def get_statistics(self):

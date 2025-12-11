@@ -12,8 +12,13 @@ from reportlab.lib.pagesizes import letter, landscape
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageTk
 
+try:
+    import fitz  # PyMuPDF
+    PYMUPDF_AVAILABLE = True
+except ImportError:
+    PYMUPDF_AVAILABLE = False
 
 REPORTLAB_AVAILABLE = True
 PIL_AVAILABLE = True
@@ -1063,140 +1068,774 @@ class GolfApp:
         ttk.Button(btn_frame, text="Close", command=win.destroy).pack(side='left', padx=5)
 
     def open_rulebook(self):
+        """Open an enhanced PDF rulebook viewer with Apple HIG-inspired design."""
         self.rulebook_window = tk.Toplevel(self.root)
-        self.rulebook_window.title("📖 USGA/PGA Rulebook")
-        self.rulebook_window.geometry("800x650")
+        self.rulebook_window.title("Rules of Golf")
+        self.rulebook_window.geometry("1200x800")
+        self.rulebook_window.minsize(1000, 650)
+        
+        # Configure Apple HIG-inspired styling
+        style = ttk.Style()
+        style.configure("Sidebar.TFrame", background="#F5F5F7")
+        style.configure("Toolbar.TFrame", background="#FFFFFF")
+        style.configure("Sidebar.Treeview", background="#F5F5F7", fieldbackground="#F5F5F7",
+                       font=("SF Pro Text", 11))
+        style.configure("Sidebar.Treeview.Heading", font=("SF Pro Text", 11, "bold"))
+        style.map("Sidebar.Treeview", background=[("selected", "#007AFF")])
+        
+        # Initialize PDF viewer state
+        self.current_pdf_page = 0
+        self.pdf_zoom = 1.5
+        self.pdf_images = []
+        self.highlight_mode = False
+        self.highlight_color = "#FFFF00"  # Yellow default
+        self.pdf_annotations = self.backend.get_pdf_annotations() if hasattr(self.backend, 'get_pdf_annotations') else {}
+        self.page_bookmarks = self.backend.get_page_bookmarks() if hasattr(self.backend, 'get_page_bookmarks') else []
 
         main_frame = ttk.Frame(self.rulebook_window)
-        main_frame.pack(fill='both', expand=True, padx=10, pady=10)
+        main_frame.pack(fill='both', expand=True)
 
-        # Header with version info and PDF status
-        header_frame = ttk.Frame(main_frame)
-        header_frame.pack(fill='x')
-
-        version_info = self.backend.get_rulebook_version()
-        ttk.Label(header_frame, text="📖 Rules of Golf", style="Title.TLabel").pack(side='left')
+        # ===== TOOLBAR (Apple-style unified toolbar) =====
+        toolbar_frame = ttk.Frame(main_frame, style="Toolbar.TFrame")
+        toolbar_frame.pack(fill='x', padx=0, pady=0)
         
-        # Show PDF status
-        status_frame = ttk.Frame(header_frame)
-        status_frame.pack(side='right')
-        ttk.Label(status_frame, text=f"Version: {version_info['version']}", font=("Helvetica", 9)).pack(side='left', padx=5)
+        # Inner toolbar with padding
+        toolbar_inner = ttk.Frame(toolbar_frame)
+        toolbar_inner.pack(fill='x', padx=15, pady=8)
         
-        if self.backend.is_rulebook_available():
-            total_pages = self.backend.get_total_pages()
-            ttk.Label(status_frame, text=f"({total_pages} pages)", font=("Helvetica", 9), foreground='green').pack(side='left')
-        else:
-            ttk.Label(status_frame, text="(PDF not loaded)", font=("Helvetica", 9), foreground='red').pack(side='left')
-
-        # Search frame with enhanced options
-        search_frame = ttk.LabelFrame(main_frame, text="Search Rules", padding=10)
-        search_frame.pack(fill='x', pady=10)
-
-        search_row1 = ttk.Frame(search_frame)
-        search_row1.pack(fill='x')
+        # Left: Navigation
+        nav_group = ttk.Frame(toolbar_inner)
+        nav_group.pack(side='left')
         
+        ttk.Button(nav_group, text="◀", command=self.prev_page, width=3).pack(side='left', padx=1)
+        ttk.Button(nav_group, text="▶", command=self.next_page, width=3).pack(side='left', padx=1)
+        
+        ttk.Separator(toolbar_inner, orient='vertical').pack(side='left', fill='y', padx=12)
+        
+        # Page indicator
+        page_group = ttk.Frame(toolbar_inner)
+        page_group.pack(side='left')
+        
+        self.page_num_var = tk.StringVar(value="1")
+        self.page_entry = ttk.Entry(page_group, textvariable=self.page_num_var, width=5, justify='center')
+        self.page_entry.pack(side='left')
+        self.page_entry.bind('<Return>', lambda e: self.go_to_entered_page())
+        
+        total_pages = self.backend.get_total_pages() if self.backend.is_rulebook_available() else 0
+        self.total_pages_label = ttk.Label(page_group, text=f" of {total_pages}", font=("SF Pro Text", 11))
+        self.total_pages_label.pack(side='left')
+        
+        ttk.Separator(toolbar_inner, orient='vertical').pack(side='left', fill='y', padx=12)
+        
+        # Zoom controls
+        zoom_group = ttk.Frame(toolbar_inner)
+        zoom_group.pack(side='left')
+        
+        ttk.Button(zoom_group, text="−", command=self.zoom_out, width=3).pack(side='left', padx=1)
+        self.zoom_label = ttk.Label(zoom_group, text="150%", width=5, anchor='center', font=("SF Pro Text", 10))
+        self.zoom_label.pack(side='left', padx=4)
+        ttk.Button(zoom_group, text="+", command=self.zoom_in, width=3).pack(side='left', padx=1)
+        
+        ttk.Separator(toolbar_inner, orient='vertical').pack(side='left', fill='y', padx=12)
+        
+        # Search (Apple-style search field)
+        search_group = ttk.Frame(toolbar_inner)
+        search_group.pack(side='left', fill='x', expand=True)
+        
+        ttk.Label(search_group, text="🔍", font=("SF Pro Text", 12)).pack(side='left')
         self.rule_search_var = tk.StringVar()
-        search_entry = ttk.Entry(search_row1, textvariable=self.rule_search_var, width=40)
-        search_entry.pack(side='left', padx=(0, 10))
-        search_entry.bind('<Return>', lambda e: self.search_rules())
+        search_entry = ttk.Entry(search_group, textvariable=self.rule_search_var, width=30)
+        search_entry.pack(side='left', padx=5)
+        search_entry.bind('<Return>', lambda e: self.search_pdf_with_highlight())
+        
+        ttk.Separator(toolbar_inner, orient='vertical').pack(side='left', fill='y', padx=12)
+        
+        # Annotation tools
+        annot_group = ttk.Frame(toolbar_inner)
+        annot_group.pack(side='left')
+        
+        self.highlight_btn = ttk.Button(annot_group, text="🖍", command=self.toggle_highlight_mode, width=3)
+        self.highlight_btn.pack(side='left', padx=2)
+        
+        self.highlight_color_var = tk.StringVar(value="Yellow")
+        color_combo = ttk.Combobox(annot_group, textvariable=self.highlight_color_var, 
+                                    values=["Yellow", "Green", "Blue", "Pink"], width=7, state='readonly')
+        color_combo.pack(side='left', padx=2)
+        color_combo.bind('<<ComboboxSelected>>', self.on_highlight_color_change)
+        
+        ttk.Button(annot_group, text="📝", command=self.add_page_note, width=3).pack(side='left', padx=2)
+        ttk.Button(annot_group, text="⭐", command=self.bookmark_current_page, width=3).pack(side='left', padx=2)
+        
+        # Right: Import/Settings
+        right_group = ttk.Frame(toolbar_inner)
+        right_group.pack(side='right')
+        
+        ttk.Button(right_group, text="📥 Import", command=self.import_rulebook).pack(side='left', padx=2)
 
-        ttk.Button(search_row1, text="🔍 Search Rules", command=self.search_rules).pack(side='left')
-        ttk.Button(search_row1, text="📄 Search Pages", command=self.search_pdf_pages).pack(side='left', padx=5)
-        ttk.Button(search_row1, text="📑 Bookmarks", command=self.show_bookmarks).pack(side='left', padx=10)
-        ttk.Button(search_row1, text="📝 My Notes", command=self.show_all_notes).pack(side='left')
+        # ===== MAIN CONTENT (Split View - Apple style) =====
+        content_pane = ttk.PanedWindow(main_frame, orient='horizontal')
+        content_pane.pack(fill='both', expand=True)
 
-        # Paned window for navigation and content
-        paned = ttk.PanedWindow(main_frame, orient='horizontal')
-        paned.pack(fill='both', expand=True, pady=10)
-
-        # Navigation frame with sections
-        nav_frame = ttk.LabelFrame(paned, text="Sections", padding=5)
-        self.section_tree = ttk.Treeview(nav_frame, show="tree", height=20)
-        nav_scroll = ttk.Scrollbar(nav_frame, orient='vertical', command=self.section_tree.yview)
-        self.section_tree.configure(yscrollcommand=nav_scroll.set)
+        # ----- LEFT SIDEBAR: Table of Contents -----
+        sidebar_frame = ttk.Frame(content_pane, style="Sidebar.TFrame", width=320)
+        
+        # Sidebar header
+        sidebar_header = ttk.Frame(sidebar_frame)
+        sidebar_header.pack(fill='x', padx=10, pady=(10, 5))
+        ttk.Label(sidebar_header, text="Table of Contents", font=("SF Pro Display", 13, "bold")).pack(side='left')
+        
+        # TOC Tree with Apple-style appearance
+        toc_container = ttk.Frame(sidebar_frame)
+        toc_container.pack(fill='both', expand=True, padx=5, pady=5)
+        
+        self.section_tree = ttk.Treeview(toc_container, show="tree", style="Sidebar.Treeview", selectmode='browse')
+        toc_scroll = ttk.Scrollbar(toc_container, orient='vertical', command=self.section_tree.yview)
+        self.section_tree.configure(yscrollcommand=toc_scroll.set)
         self.section_tree.pack(side='left', fill='both', expand=True)
-        nav_scroll.pack(side='right', fill='y')
+        toc_scroll.pack(side='right', fill='y')
         self.section_tree.bind('<<TreeviewSelect>>', self.on_section_select)
-
-        # Load sections from PDF
-        sections = self.backend.get_all_sections()
-        if sections:
-            for section_id, section_title in sections:
-                self.section_tree.insert("", "end", iid=section_id, text=f"Rule {section_id}: {section_title}")
-        else:
-            self.section_tree.insert("", "end", iid="no_sections", text="No sections found - Import PDF")
-
-        paned.add(nav_frame, weight=1)
-
-        # Content frame
-        content_frame = ttk.LabelFrame(paned, text="Rule Details", padding=5)
-        self.rule_content = tk.Text(content_frame, wrap='word', height=25, width=55)
-        content_scroll = ttk.Scrollbar(content_frame, orient='vertical', command=self.rule_content.yview)
-        self.rule_content.configure(yscrollcommand=content_scroll.set)
-        self.rule_content.pack(side='left', fill='both', expand=True)
-        content_scroll.pack(side='right', fill='y')
-        paned.add(content_frame, weight=2)
-
-        # Bottom button frame
-        btn_frame = ttk.Frame(main_frame)
-        btn_frame.pack(fill='x', pady=10)
         
-        ttk.Button(btn_frame, text="📥 Import PDF Rulebook", command=self.import_rulebook).pack(side='left')
+        # Load TOC
+        self._load_section_tree()
         
-        # Page browser button (only if PDF available)
+        # Sidebar footer with bookmarks/search results toggle
+        sidebar_footer = ttk.Frame(sidebar_frame)
+        sidebar_footer.pack(fill='x', padx=10, pady=10)
+        ttk.Button(sidebar_footer, text="📑 Bookmarks", command=self.show_page_bookmarks).pack(side='left', padx=2)
+        ttk.Button(sidebar_footer, text="📝 Notes", command=self.show_all_notes).pack(side='left', padx=2)
+        
+        content_pane.add(sidebar_frame, weight=1)
+
+        # ----- RIGHT: PDF View -----
+        pdf_frame = ttk.Frame(content_pane)
+        
+        # PDF Canvas with dark background (like Preview.app)
+        canvas_container = ttk.Frame(pdf_frame)
+        canvas_container.pack(fill='both', expand=True)
+        
+        self.pdf_canvas = tk.Canvas(canvas_container, bg='#525252', highlightthickness=0)
+        self.pdf_v_scroll = ttk.Scrollbar(canvas_container, orient='vertical', command=self.pdf_canvas.yview)
+        self.pdf_h_scroll = ttk.Scrollbar(canvas_container, orient='horizontal', command=self.pdf_canvas.xview)
+        
+        self.pdf_canvas.configure(yscrollcommand=self.pdf_v_scroll.set, xscrollcommand=self.pdf_h_scroll.set)
+        
+        self.pdf_v_scroll.pack(side='right', fill='y')
+        self.pdf_h_scroll.pack(side='bottom', fill='x')
+        self.pdf_canvas.pack(side='left', fill='both', expand=True)
+        
+        # Mouse bindings
+        self.pdf_canvas.bind('<MouseWheel>', self.on_mousewheel)
+        self.pdf_canvas.bind('<Button-4>', lambda e: self.pdf_canvas.yview_scroll(-1, 'units'))
+        self.pdf_canvas.bind('<Button-5>', lambda e: self.pdf_canvas.yview_scroll(1, 'units'))
+        self.pdf_canvas.bind('<Button-1>', self.on_canvas_click)
+        self.pdf_canvas.bind('<B1-Motion>', self.on_canvas_drag)
+        self.pdf_canvas.bind('<ButtonRelease-1>', self.on_canvas_release)
+        
+        self.highlight_start = None
+        self.temp_highlight = None
+        
+        content_pane.add(pdf_frame, weight=3)
+
+        # ===== STATUS BAR =====
+        status_bar = ttk.Frame(main_frame)
+        status_bar.pack(fill='x', pady=(5, 0))
+        
+        self.status_var = tk.StringVar(value="Ready")
+        ttk.Label(status_bar, textvariable=self.status_var, font=("SF Pro Text", 10), foreground='#666666').pack(side='left', padx=10)
+
+        # Show initial content
         if self.backend.is_rulebook_available():
-            ttk.Button(btn_frame, text="📖 Browse Pages", command=self.open_page_browser).pack(side='left', padx=10)
-        
-        ttk.Button(btn_frame, text="Close", command=self.rulebook_window.destroy).pack(side='right')
-
-        # Welcome message
-        welcome_text = """Welcome to the Rules of Golf!
-
-This rulebook viewer reads directly from the official PDF.
-
-FEATURES:
-• Browse by rule sections (left panel)
-• Search across all rules
-• Search specific PDF pages
-• Bookmark important rules
-• Add personal notes to rules
-• Import updated rulebook PDF versions
-
-"""
-        if not self.backend.is_rulebook_available():
-            welcome_text += """⚠️ NO PDF LOADED
-Click 'Import PDF Rulebook' to load your Rules of Golf PDF.
-Place the PDF at: data/2023_Rules_of_Golf.pdf
-
-Or use the import button below."""
+            self.display_pdf_page_canvas(0)
         else:
-            welcome_text += f"""✅ PDF Loaded: {version_info['version']} Rules of Golf
-Total Pages: {self.backend.get_total_pages()}
+            self._show_welcome_message()
+    def _load_section_tree(self):
+        """Load hierarchical TOC into the tree view with Apple HIG-inspired styling."""
+        for item in self.section_tree.get_children():
+            self.section_tree.delete(item)
+        
+        # Get the full hierarchical TOC from backend
+        rulebook = self.backend.get_rulebook()
+        if not rulebook or not rulebook.is_available():
+            self.section_tree.insert("", "end", iid="no_pdf", text="📥 Import PDF to view contents")
+            return
+        
+        toc = rulebook.get_toc()
+        if not toc:
+            self.section_tree.insert("", "end", iid="no_toc", text="No table of contents found")
+            return
+        
+        # Track parent items for hierarchy
+        parent_stack = {0: ""}  # level -> parent iid
+        
+        for i, item in enumerate(toc):
+            level = item["level"]
+            title = item["title"]
+            page = item["page"]
+            item_id = f"toc_{i}"
+            
+            # Find appropriate parent
+            parent_iid = parent_stack.get(level - 1, "")
+            
+            # Format display text based on level (Apple HIG: clear hierarchy, readable)
+            if level == 1:
+                # Part headers - bold, prominent
+                display_text = f"📘 {title}"
+            elif level == 2:
+                # Rules - clear numbering
+                display_text = f"    {title}"
+            else:
+                # Sub-rules - indented, lighter
+                display_text = f"        {title}"
+            
+            # Insert with page info stored in values
+            self.section_tree.insert(parent_iid, "end", iid=item_id, text=display_text, 
+                                    values=(page,), open=(level == 1))
+            
+            # Update parent stack for this level
+            parent_stack[level] = item_id
+            # Clear deeper levels
+            for l in list(parent_stack.keys()):
+                if l > level:
+                    del parent_stack[l]
+    
+    def _show_welcome_message(self):
+        """Show welcome message on canvas when no PDF is loaded."""
+        self.pdf_canvas.delete('all')
+        
+        # Apple HIG inspired: clean, centered, helpful
+        welcome_lines = [
+            "",
+            "📖 Rules of Golf Viewer",
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "",
+            "No PDF Loaded",
+            "",
+            "Click 'Import PDF' below to load",
+            "the official Rules of Golf PDF.",
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "",
+            "Features:",
+            "• Navigate using Table of Contents",
+            "• Search across all pages",
+            "• Highlight important text",
+            "• Add notes to any page",
+            "• Bookmark pages for quick access",
+        ]
+        
+        y_pos = 80
+        for line in welcome_lines:
+            if line.startswith("📖"):
+                self.pdf_canvas.create_text(300, y_pos, text=line, fill='#FFFFFF', 
+                                            font=("SF Pro Display", 18, "bold"), anchor='center')
+            elif line.startswith("━"):
+                self.pdf_canvas.create_text(300, y_pos, text=line, fill='#666666', 
+                                            font=("Helvetica", 10), anchor='center')
+            elif line == "No PDF Loaded":
+                self.pdf_canvas.create_text(300, y_pos, text=line, fill='#FF9500', 
+                                            font=("SF Pro Text", 14), anchor='center')
+            elif line.startswith("Features"):
+                self.pdf_canvas.create_text(300, y_pos, text=line, fill='#AAAAAA', 
+                                            font=("SF Pro Text", 12, "bold"), anchor='center')
+            elif line.startswith("•"):
+                self.pdf_canvas.create_text(300, y_pos, text=line, fill='#888888', 
+                                            font=("SF Pro Text", 11), anchor='center')
+            else:
+                self.pdf_canvas.create_text(300, y_pos, text=line, fill='#CCCCCC', 
+                                            font=("SF Pro Text", 12), anchor='center')
+            y_pos += 24
 
-Select a section from the left to get started!"""
-
-        self.rule_content.insert('1.0', welcome_text)
-        self.rule_content.config(state='disabled')
-
-    def search_rules(self):
+    # ===== PDF CANVAS DISPLAY METHODS =====
+    
+    def display_pdf_page_canvas(self, page_num):
+        """Display a PDF page on the canvas with proper rendering."""
+        if not PYMUPDF_AVAILABLE:
+            self.status_var.set("PyMuPDF not installed")
+            return
+        
+        rulebook = self.backend.get_rulebook()
+        if not rulebook.is_available():
+            self.status_var.set("No PDF loaded")
+            return
+        
+        doc = rulebook.doc
+        total_pages = len(doc)
+        
+        # Bounds check
+        if page_num < 0:
+            page_num = 0
+        if page_num >= total_pages:
+            page_num = total_pages - 1
+        
+        self.current_pdf_page = page_num
+        self.page_num_var.set(str(page_num + 1))
+        
+        try:
+            page = doc[page_num]
+            
+            # Render with current zoom level
+            mat = fitz.Matrix(self.pdf_zoom, self.pdf_zoom)
+            pix = page.get_pixmap(matrix=mat)
+            
+            # FIX: Use samples for correct RGB data (no red tint)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            
+            # Convert to PhotoImage
+            photo = ImageTk.PhotoImage(img)
+            
+            # Store reference
+            self.pdf_images = [photo]  # Clear old, keep only current
+            
+            # Clear canvas and display
+            self.pdf_canvas.delete('all')
+            
+            # Center image on canvas
+            canvas_width = self.pdf_canvas.winfo_width()
+            canvas_height = self.pdf_canvas.winfo_height()
+            
+            x_offset = max(0, (canvas_width - pix.width) // 2)
+            y_offset = 10
+            
+            self.pdf_canvas.create_image(x_offset, y_offset, anchor='nw', image=photo, tags='pdf_page')
+            
+            # Set scroll region
+            self.pdf_canvas.configure(scrollregion=(0, 0, max(pix.width, canvas_width), pix.height + 20))
+            
+            # Draw any saved annotations for this page
+            self._draw_page_annotations(page_num, x_offset, y_offset)
+            
+            # Update status
+            bookmark_status = "⭐ Bookmarked" if (page_num + 1) in self.page_bookmarks else ""
+            self.status_var.set(f"Page {page_num + 1} of {total_pages} {bookmark_status}")
+            
+        except Exception as e:
+            self.status_var.set(f"Error: {str(e)}")
+            self.pdf_canvas.delete('all')
+            self.pdf_canvas.create_text(300, 200, text=f"Error loading page:\n{str(e)}", 
+                                        fill='red', font=("Helvetica", 11))
+    
+    def _draw_page_annotations(self, page_num, x_offset, y_offset):
+        """Draw saved highlights and annotations for a page."""
+        page_key = str(page_num)
+        if page_key in self.pdf_annotations:
+            for annotation in self.pdf_annotations[page_key]:
+                if annotation['type'] == 'highlight':
+                    x1 = annotation['x1'] * self.pdf_zoom + x_offset
+                    y1 = annotation['y1'] * self.pdf_zoom + y_offset
+                    x2 = annotation['x2'] * self.pdf_zoom + x_offset
+                    y2 = annotation['y2'] * self.pdf_zoom + y_offset
+                    color = annotation.get('color', '#FFFF00')
+                    self.pdf_canvas.create_rectangle(x1, y1, x2, y2, 
+                                                     fill=color, stipple='gray50',
+                                                     outline='', tags='annotation')
+    
+    # ===== NAVIGATION METHODS =====
+    
+    def next_page(self):
+        """Go to next page."""
+        if self.backend.is_rulebook_available():
+            total = self.backend.get_total_pages()
+            if self.current_pdf_page < total - 1:
+                self.display_pdf_page_canvas(self.current_pdf_page + 1)
+    
+    def prev_page(self):
+        """Go to previous page."""
+        if self.current_pdf_page > 0:
+            self.display_pdf_page_canvas(self.current_pdf_page - 1)
+    
+    def go_to_page(self, page_num):
+        """Go to specific page (0-indexed)."""
+        if self.backend.is_rulebook_available():
+            self.display_pdf_page_canvas(page_num)
+    
+    def go_to_entered_page(self):
+        """Go to page number entered in the entry field."""
+        try:
+            page_num = int(self.page_num_var.get()) - 1  # Convert to 0-indexed
+            self.go_to_page(page_num)
+        except ValueError:
+            messagebox.showwarning("Invalid Page", "Please enter a valid page number")
+    
+    # ===== ZOOM METHODS =====
+    
+    def zoom_in(self):
+        """Increase zoom level."""
+        if self.pdf_zoom < 4.0:
+            self.pdf_zoom += 0.25
+            self.zoom_label.config(text=f"{int(self.pdf_zoom * 100)}%")
+            self.display_pdf_page_canvas(self.current_pdf_page)
+    
+    def zoom_out(self):
+        """Decrease zoom level."""
+        if self.pdf_zoom > 0.5:
+            self.pdf_zoom -= 0.25
+            self.zoom_label.config(text=f"{int(self.pdf_zoom * 100)}%")
+            self.display_pdf_page_canvas(self.current_pdf_page)
+    
+    def zoom_fit(self):
+        """Fit page to canvas width."""
+        if not self.backend.is_rulebook_available():
+            return
+        
+        rulebook = self.backend.get_rulebook()
+        doc = rulebook.doc
+        page = doc[self.current_pdf_page]
+        page_width = page.rect.width
+        canvas_width = self.pdf_canvas.winfo_width() - 40
+        
+        if canvas_width > 100 and page_width > 0:
+            self.pdf_zoom = canvas_width / page_width
+            self.zoom_label.config(text=f"{int(self.pdf_zoom * 100)}%")
+            self.display_pdf_page_canvas(self.current_pdf_page)
+    
+    # ===== MOUSE EVENT HANDLERS =====
+    
+    def on_mousewheel(self, event):
+        """Handle mouse wheel for scrolling."""
+        self.pdf_canvas.yview_scroll(-1 * (event.delta // 120), 'units')
+    
+    def on_canvas_click(self, event):
+        """Handle click on canvas for highlight start."""
+        if self.highlight_mode:
+            self.highlight_start = (self.pdf_canvas.canvasx(event.x), 
+                                   self.pdf_canvas.canvasy(event.y))
+    
+    def on_canvas_drag(self, event):
+        """Handle drag for highlight drawing."""
+        if self.highlight_mode and self.highlight_start:
+            if self.temp_highlight:
+                self.pdf_canvas.delete(self.temp_highlight)
+            
+            x1, y1 = self.highlight_start
+            x2 = self.pdf_canvas.canvasx(event.x)
+            y2 = self.pdf_canvas.canvasy(event.y)
+            
+            self.temp_highlight = self.pdf_canvas.create_rectangle(
+                x1, y1, x2, y2,
+                fill=self.highlight_color, stipple='gray50',
+                outline=self.highlight_color, tags='temp_highlight'
+            )
+    
+    def on_canvas_release(self, event):
+        """Handle release to complete highlight."""
+        if self.highlight_mode and self.highlight_start:
+            x1, y1 = self.highlight_start
+            x2 = self.pdf_canvas.canvasx(event.x)
+            y2 = self.pdf_canvas.canvasy(event.y)
+            
+            # Only save if it's a meaningful selection
+            if abs(x2 - x1) > 10 and abs(y2 - y1) > 5:
+                self._save_highlight(x1, y1, x2, y2)
+            
+            # Clear temp
+            if self.temp_highlight:
+                self.pdf_canvas.delete(self.temp_highlight)
+            self.highlight_start = None
+            self.temp_highlight = None
+    
+    def _save_highlight(self, x1, y1, x2, y2):
+        """Save a highlight annotation."""
+        # Get canvas offset to convert to page coordinates
+        canvas_items = self.pdf_canvas.find_withtag('pdf_page')
+        if not canvas_items:
+            return
+        
+        coords = self.pdf_canvas.coords(canvas_items[0])
+        x_offset = coords[0] if coords else 0
+        y_offset = coords[1] if coords else 0
+        
+        # Convert to base coordinates (without zoom)
+        annotation = {
+            'type': 'highlight',
+            'x1': (min(x1, x2) - x_offset) / self.pdf_zoom,
+            'y1': (min(y1, y2) - y_offset) / self.pdf_zoom,
+            'x2': (max(x1, x2) - x_offset) / self.pdf_zoom,
+            'y2': (max(y1, y2) - y_offset) / self.pdf_zoom,
+            'color': self.highlight_color
+        }
+        
+        page_key = str(self.current_pdf_page)
+        if page_key not in self.pdf_annotations:
+            self.pdf_annotations[page_key] = []
+        self.pdf_annotations[page_key].append(annotation)
+        
+        # Save to backend
+        if hasattr(self.backend, 'save_pdf_annotations'):
+            self.backend.save_pdf_annotations(self.pdf_annotations)
+        
+        # Redraw to show saved annotation properly
+        self.display_pdf_page_canvas(self.current_pdf_page)
+        self.status_var.set(f"Highlight added to page {self.current_pdf_page + 1}")
+    
+    # ===== HIGHLIGHT/ANNOTATION TOOLS =====
+    
+    def toggle_highlight_mode(self):
+        """Toggle highlight mode on/off."""
+        self.highlight_mode = not self.highlight_mode
+        if self.highlight_mode:
+            self.highlight_btn.config(text="🖍 ON")
+            self.pdf_canvas.config(cursor='cross')
+            self.status_var.set("Highlight mode: Click and drag to highlight")
+        else:
+            self.highlight_btn.config(text="🖍 Highlight")
+            self.pdf_canvas.config(cursor='')
+            self.status_var.set("Highlight mode off")
+    
+    def on_highlight_color_change(self, event):
+        """Change highlight color."""
+        color_map = {
+            "Yellow": "#FFFF00",
+            "Green": "#90EE90",
+            "Blue": "#87CEEB",
+            "Pink": "#FFB6C1",
+            "Orange": "#FFA500"
+        }
+        self.highlight_color = color_map.get(self.highlight_color_var.get(), "#FFFF00")
+    
+    def add_page_note(self):
+        """Add a note to the current page."""
+        if not self.backend.is_rulebook_available():
+            return messagebox.showwarning("Warning", "No PDF loaded")
+        
+        note_win = tk.Toplevel(self.rulebook_window)
+        note_win.title(f"📝 Note for Page {self.current_pdf_page + 1}")
+        note_win.geometry("400x250")
+        note_win.transient(self.rulebook_window)
+        
+        frame = ttk.Frame(note_win, padding=15)
+        frame.pack(fill='both', expand=True)
+        
+        ttk.Label(frame, text=f"Add note for Page {self.current_pdf_page + 1}:", 
+                  font=("Helvetica", 11, "bold")).pack(anchor='w')
+        
+        # Get existing note
+        page_key = str(self.current_pdf_page)
+        existing_note = ""
+        if page_key in self.pdf_annotations:
+            for ann in self.pdf_annotations[page_key]:
+                if ann.get('type') == 'note':
+                    existing_note = ann.get('text', '')
+                    break
+        
+        note_text = tk.Text(frame, wrap='word', height=8, width=45)
+        note_text.pack(fill='both', expand=True, pady=10)
+        note_text.insert('1.0', existing_note)
+        
+        def save_note():
+            text = note_text.get('1.0', tk.END).strip()
+            if text:
+                # Remove old note if exists
+                if page_key in self.pdf_annotations:
+                    self.pdf_annotations[page_key] = [a for a in self.pdf_annotations[page_key] 
+                                                      if a.get('type') != 'note']
+                else:
+                    self.pdf_annotations[page_key] = []
+                
+                self.pdf_annotations[page_key].append({
+                    'type': 'note',
+                    'text': text
+                })
+                
+                if hasattr(self.backend, 'save_pdf_annotations'):
+                    self.backend.save_pdf_annotations(self.pdf_annotations)
+                
+                self.status_var.set(f"Note saved for page {self.current_pdf_page + 1}")
+            note_win.destroy()
+        
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill='x')
+        ttk.Button(btn_frame, text="💾 Save Note", command=save_note).pack(side='left')
+        ttk.Button(btn_frame, text="Cancel", command=note_win.destroy).pack(side='right')
+    
+    def clear_annotations(self):
+        """Clear all annotations for current page."""
+        if messagebox.askyesno("Clear Annotations", 
+                              f"Clear all highlights and notes from page {self.current_pdf_page + 1}?"):
+            page_key = str(self.current_pdf_page)
+            if page_key in self.pdf_annotations:
+                del self.pdf_annotations[page_key]
+                if hasattr(self.backend, 'save_pdf_annotations'):
+                    self.backend.save_pdf_annotations(self.pdf_annotations)
+                self.display_pdf_page_canvas(self.current_pdf_page)
+                self.status_var.set("Annotations cleared")
+    
+    # ===== BOOKMARK METHODS =====
+    
+    def bookmark_current_page(self):
+        """Bookmark or unbookmark the current page."""
+        page_num = self.current_pdf_page + 1  # 1-indexed for storage
+        
+        if page_num in self.page_bookmarks:
+            self.page_bookmarks.remove(page_num)
+            self.status_var.set(f"Bookmark removed from page {page_num}")
+        else:
+            self.page_bookmarks.append(page_num)
+            self.page_bookmarks.sort()
+            self.status_var.set(f"Page {page_num} bookmarked")
+        
+        # Save to backend
+        if hasattr(self.backend, 'save_page_bookmarks'):
+            self.backend.save_page_bookmarks(self.page_bookmarks)
+        
+        # Update page list display
+        self._refresh_page_list()
+    
+    def _refresh_page_list(self):
+        """Refresh any page list displays to show bookmark indicators."""
+        # The new UI doesn't have a separate page listbox, so this is a no-op
+        # Bookmarks are tracked in self.page_bookmarks and shown in the bookmarks dialog
+        pass
+    
+    def show_page_bookmarks(self):
+        """Show list of bookmarked pages."""
+        win = tk.Toplevel(self.rulebook_window)
+        win.title("📑 Bookmarked Pages")
+        win.geometry("350x400")
+        win.transient(self.rulebook_window)
+        
+        frame = ttk.Frame(win, padding=15)
+        frame.pack(fill='both', expand=True)
+        
+        ttk.Label(frame, text="📑 Bookmarked Pages", style="Title.TLabel").pack(pady=(0, 10))
+        
+        if not self.page_bookmarks:
+            ttk.Label(frame, text="No bookmarked pages yet.\n\nClick '⭐ Bookmark Page' while viewing a page.").pack(pady=20)
+        else:
+            listbox = tk.Listbox(frame, height=15, width=35)
+            scroll = ttk.Scrollbar(frame, orient='vertical', command=listbox.yview)
+            listbox.configure(yscrollcommand=scroll.set)
+            listbox.pack(side='left', fill='both', expand=True)
+            scroll.pack(side='right', fill='y')
+            
+            for page_num in self.page_bookmarks:
+                listbox.insert(tk.END, f"⭐ Page {page_num}")
+            
+            def go_to_bookmark():
+                sel = listbox.curselection()
+                if sel:
+                    page_num = self.page_bookmarks[sel[0]] - 1  # Convert to 0-indexed
+                    self.display_pdf_page_canvas(page_num)
+                    win.destroy()
+            
+            def remove_bookmark():
+                sel = listbox.curselection()
+                if sel:
+                    page_num = self.page_bookmarks[sel[0]]
+                    self.page_bookmarks.remove(page_num)
+                    listbox.delete(sel[0])
+                    if hasattr(self.backend, 'save_page_bookmarks'):
+                        self.backend.save_page_bookmarks(self.page_bookmarks)
+                    self._refresh_page_list()
+            
+            btn_frame = ttk.Frame(frame)
+            btn_frame.pack(fill='x', pady=10)
+            ttk.Button(btn_frame, text="Go to Page", command=go_to_bookmark).pack(side='left', padx=5)
+            ttk.Button(btn_frame, text="Remove", command=remove_bookmark).pack(side='left')
+        
+        ttk.Button(frame, text="Close", command=win.destroy).pack(pady=10)
+    
+    # ===== SEARCH METHODS =====
+    
+    def search_pdf_with_highlight(self):
+        """Search PDF and show results in a popup window."""
         query = self.rule_search_var.get().strip()
         if not query:
             return messagebox.showwarning("Warning", "Enter a search term")
-
-        results = self.backend.search_rulebook(query)
-        self.rule_content.config(state='normal')
-        self.rule_content.delete('1.0', tk.END)
-
+        
+        if not self.backend.is_rulebook_available():
+            return messagebox.showwarning("Warning", "No PDF loaded")
+        
+        results = self.backend.search_rulebook_pages(query)
+        self._search_results = results  # Store for later access
+        
         if not results:
-            self.rule_content.insert('1.0', f"No results found for '{query}'\n\nTry different keywords or use 'Search Pages' for direct PDF text search.")
+            self.status_var.set(f"No matches found for '{query}'")
+            messagebox.showinfo("Search Results", f"No matches found for '{query}'")
+            return
+        
+        # Show results in a popup window
+        self._show_search_results_window(query, results)
+        self.status_var.set(f"Found {len(results)} matches for '{query}'")
+    
+    def clear_search(self):
+        """Clear search field and results."""
+        self.rule_search_var.set("")
+        self._search_results = []
+        self.status_var.set("Search cleared")
+    
+    # ===== NAVIGATION EVENT HANDLERS =====
+    
+    def on_section_select(self, event):
+        """Handle section selection from tree."""
+        selection = self.section_tree.selection()
+        if not selection:
+            return
+        
+        # Skip placeholder items
+        if selection[0] in ("no_pdf", "no_toc", "no_sections"):
+            return
+        
+        # Get page from item values (stored when tree was built)
+        item = self.section_tree.item(selection[0])
+        values = item.get('values', ())
+        
+        if values and len(values) > 0 and values[0] is not None:
+            try:
+                page_num = int(values[0])
+                self.display_pdf_page_canvas(page_num)
+                self.status_var.set(f"Page {page_num + 1}")
+            except (ValueError, TypeError):
+                self.status_var.set("Could not navigate to page")
         else:
-            self.rule_content.insert('1.0', f"Search Results for '{query}' ({len(results)} found):\n\n")
-            for result in results:
-                is_bookmarked = "★ " if self.backend.is_bookmarked(result['rule_id']) else ""
-                page_info = f" (Page {result.get('page', '?') + 1})" if result.get('page') else ""
-                self.rule_content.insert(tk.END, f"{is_bookmarked}Rule {result['rule_id']}: {result['rule_title']}{page_info}\nSection: {result['section_title']}\n\n{result['content'][:300]}{'...' if len(result['content']) > 300 else ''}\n\n" + "─" * 50 + "\n\n")
+            self.status_var.set("No page information available")
+    
+    def _show_search_results_window(self, query, results):
+        """Show search results in a popup window."""
+        results_win = tk.Toplevel(self.rulebook_window)
+        results_win.title(f"Search Results: {query}")
+        results_win.geometry("500x400")
+        results_win.transient(self.rulebook_window)
+        
+        frame = ttk.Frame(results_win, padding=15)
+        frame.pack(fill='both', expand=True)
+        
+        ttk.Label(frame, text=f"Found {len(results)} matches for '{query}'", 
+                  font=("SF Pro Text", 12, "bold")).pack(anchor='w', pady=(0, 10))
+        
+        # Results listbox
+        list_frame = ttk.Frame(frame)
+        list_frame.pack(fill='both', expand=True)
+        
+        results_list = tk.Listbox(list_frame, height=15, width=60, font=("SF Pro Text", 11))
+        scroll = ttk.Scrollbar(list_frame, orient='vertical', command=results_list.yview)
+        results_list.configure(yscrollcommand=scroll.set)
+        results_list.pack(side='left', fill='both', expand=True)
+        scroll.pack(side='right', fill='y')
+        
+        for result in results:
+            snippet = result['snippet'][:60].replace('\n', ' ')
+            results_list.insert(tk.END, f"Page {result['page']}: {snippet}...")
+        
+        def go_to_result():
+            sel = results_list.curselection()
+            if sel:
+                page_num = results[sel[0]]['page'] - 1  # Convert to 0-indexed
+                self.display_pdf_page_canvas(page_num)
+                results_win.destroy()
+        
+        # Buttons
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill='x', pady=(10, 0))
+        ttk.Button(btn_frame, text="Go to Page", command=go_to_result).pack(side='left')
+        ttk.Button(btn_frame, text="Close", command=results_win.destroy).pack(side='right')
+        
+        # Double-click to go to result
+        results_list.bind('<Double-1>', lambda e: go_to_result())
 
-        self.rule_content.config(state='disabled')
+    def search_rules(self):
+        """Legacy search - redirect to new search."""
+        self.search_pdf_with_highlight()
 
     def search_pdf_pages(self):
         """Search PDF pages directly and show results with page numbers."""
@@ -1279,29 +1918,6 @@ Select a section from the left to get started!"""
         
         ttk.Button(frame, text="Close", command=browser.destroy).pack(pady=10)
 
-    def on_section_select(self, event):
-        selection = self.section_tree.selection()
-        if not selection or selection[0] == "no_sections":
-            return
-
-        rules = self.backend.get_section_rules(selection[0])
-        self.rule_content.config(state='normal')
-        self.rule_content.delete('1.0', tk.END)
-
-        if not rules:
-            self.rule_content.insert('1.0', f"No detailed rules found for section {selection[0]}.\n\nTry using the 'Search Pages' button to find content directly in the PDF.")
-        else:
-            for rule in rules:
-                is_bookmarked = "★ " if self.backend.is_bookmarked(rule['id']) else ""
-                user_notes = self.backend.get_rule_notes(rule['id'])
-                page_info = f" (Page {rule.get('page', 0) + 1})" if rule.get('page') else ""
-                self.rule_content.insert(tk.END, f"{is_bookmarked}Rule {rule['id']}: {rule['title']}{page_info}\n\n{rule['content']}\n")
-                if user_notes:
-                    self.rule_content.insert(tk.END, f"\n📝 My Notes: {user_notes}\n")
-                self.rule_content.insert(tk.END, "\n" + "─" * 50 + "\n\n")
-
-        self.rule_content.config(state='disabled')
-
     def show_bookmarks(self):
         bookmarks = self.backend.get_bookmarks()
         win = tk.Toplevel(self.rulebook_window)
@@ -1370,23 +1986,20 @@ Select a section from the left to get started!"""
         if self.backend.import_rulebook_from_file(filepath):
             messagebox.showinfo("Success", "Rulebook PDF imported successfully!\n\nThe PDF will be parsed and indexed for searching.")
             
-            # Refresh the section tree
-            for item in self.section_tree.get_children():
-                self.section_tree.delete(item)
+            # Refresh the section tree with proper page mapping
+            self._load_section_tree()
             
-            sections = self.backend.get_all_sections()
-            if sections:
-                for section_id, section_title in sections:
-                    self.section_tree.insert("", "end", iid=section_id, text=f"Rule {section_id}: {section_title}")
-            else:
-                self.section_tree.insert("", "end", iid="no_sections", text="No sections found")
+            # Update page list
+            self._refresh_page_list()
             
-            # Update welcome message
-            version_info = self.backend.get_rulebook_version()
-            self.rule_content.config(state='normal')
-            self.rule_content.delete('1.0', tk.END)
-            self.rule_content.insert('1.0', f"✅ PDF Imported Successfully!\n\nVersion: {version_info['version']}\nPages: {self.backend.get_total_pages()}\n\nSelect a section from the left to get started!")
-            self.rule_content.config(state='disabled')
+            # Update total pages label
+            total_pages = self.backend.get_total_pages()
+            if hasattr(self, 'total_pages_label'):
+                self.total_pages_label.config(text=f"of {total_pages}")
+            
+            # Display first page
+            self.display_pdf_page_canvas(0)
+            self.status_var.set(f"PDF imported: {total_pages} pages")
         else:
             messagebox.showerror("Error", "Failed to import rulebook PDF.\n\nMake sure the file is a valid PDF.")
 
