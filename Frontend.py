@@ -519,20 +519,24 @@ class GolfApp:
             return
 
         choice = self.holes_choice_var.get() if hasattr(self, 'holes_choice_var') else "full_18"
-        full_ch = box.get("handicap", 0)
-        par_sum = sum(course["pars"])
-
+        
+        # Calculate proper course handicap using player's handicap index
+        course_handicap, target_score = self.backend.calculate_course_handicap(name, tee_color, choice)
+        
+        # Determine par for display
         if choice == "full_18":
-            ch = full_ch
-            par_display = par_sum
-            ts = par_sum + (round(ch) if isinstance(ch, (int, float)) else 0)
+            par_display = sum(course["pars"])
+        elif choice == "front_9":
+            par_display = sum(course["pars"][:9])
         else:
-            ch = round(full_ch / 2, 1) if isinstance(full_ch, (int, float)) else "N/A"
-            par_display = sum(course["pars"][:9]) if choice == "front_9" else (sum(course["pars"][9:]) if len(course["pars"]) > 9 else sum(course["pars"][:9]))
-            ts = par_display + (round(ch) if isinstance(ch, (int, float)) else 0)
-
-        self.course_handicap_label.config(text=f"Course Handicap: {ch}")
-        self.target_score_label.config(text=f"Target Score: {ts} (Par {par_display})")
+            par_display = sum(course["pars"][9:]) if len(course["pars"]) > 9 else sum(course["pars"][:9])
+        
+        if course_handicap is not None:
+            self.course_handicap_label.config(text=f"Course Handicap: {course_handicap}")
+            self.target_score_label.config(text=f"Target Score: {target_score} (Par {par_display})")
+        else:
+            self.course_handicap_label.config(text="Course Handicap: N/A (need handicap index)")
+            self.target_score_label.config(text=f"Target Score: N/A (Par {par_display})")
 
         total_yardage = self.backend.get_course_total_yardage(name, tee_color, choice)
         self.yardage_label.config(text=f"Total Yardage: {total_yardage} yds" if total_yardage else "Total Yardage: N/A")
@@ -983,8 +987,15 @@ class GolfApp:
             "detailed_stats": full_detailed
         }
 
-        full_ch = box.get("handicap", 0)
-        rd["target_score"] = par + round(full_ch / 2 if holes_played == 9 else full_ch)
+        # Calculate proper target score using course handicap
+        course_handicap, target_score = self.backend.calculate_course_handicap(
+            self.selected_course["name"], self.selected_tee, self.holes_choice
+        )
+        if target_score is not None:
+            rd["target_score"] = target_score
+        else:
+            # Fallback if no handicap index established - just use par
+            rd["target_score"] = par
 
         self.backend.rounds.append(rd)
         save_json(ROUNDS_FILE, self.backend.rounds)

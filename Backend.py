@@ -576,6 +576,50 @@ class GolfBackend:
         else:
             return sum(yardages)
 
+    def calculate_course_handicap(self, course_name, tee_color, holes_choice="full_18"):
+        """
+        Calculate Course Handicap for a specific course/tee combination.
+        
+        Formula (USGA/WHS): Course Handicap = Handicap Index × (Slope / 113) + (Course Rating - Par)
+        
+        For 9 holes, the course handicap is halved.
+        
+        Returns: (course_handicap, target_score) tuple, or (None, None) if no handicap established
+        """
+        handicap_index = self.calculate_handicap_index()
+        if handicap_index is None:
+            return None, None
+        
+        course = self.get_course_by_name(course_name)
+        if not course:
+            return None, None
+        
+        box = next((b for b in course["tee_boxes"] if b["color"] == tee_color), None)
+        if not box:
+            return None, None
+        
+        slope = box["slope"]
+        rating = box["rating"]
+        par_total = sum(course["pars"])
+        
+        # Full 18-hole course handicap
+        course_handicap = handicap_index * (slope / 113) + (rating - par_total)
+        
+        if holes_choice in ["front_9", "back_9"]:
+            # For 9 holes, halve the course handicap and adjust par
+            course_handicap = course_handicap / 2
+            if holes_choice == "front_9":
+                par = sum(course["pars"][:9])
+            else:
+                par = sum(course["pars"][9:]) if len(course["pars"]) > 9 else sum(course["pars"][:9])
+        else:
+            par = par_total
+        
+        course_handicap = round(course_handicap, 1)
+        target_score = par + round(course_handicap)
+        
+        return course_handicap, target_score
+
     # ---- Rounds ----
     def get_rounds(self):
         return self.rounds
