@@ -257,12 +257,15 @@ class GolfApp:
             ttk.Label(frame, text=text, font=("Helvetica", 10, "bold")).grid(row=1, column=col*2, columnspan=2, padx=5)
 
         self.tee_entries = []
+        self.tee_color_vars = []  # Store StringVars to prevent garbage collection
         existing_tb = self.editing_course["tee_boxes"] if self.editing_course else []
         common_colors = ["Black", "Blue", "White", "Gold", "Yellow", "Green", "Red"]
 
         for i in range(count):
             row = i + 2
             color_var = tk.StringVar()
+            self.tee_color_vars.append(color_var)  # Keep reference
+            
             color_cb = ttk.Combobox(frame, textvariable=color_var, width=10, values=common_colors)
             color_cb.grid(row=row, column=0, columnspan=2, padx=5, pady=3)
 
@@ -647,7 +650,7 @@ class GolfApp:
         ttk.Label(main_frame, text="Detailed Entry Mode", foreground="green", font=("Helvetica", 9, "bold")).pack()
         
         # Instructions for auto-calculation
-        ttk.Label(main_frame, text="Tap clubs in order used (including Putter). Putts & To Green auto-calculated.", 
+        ttk.Label(main_frame, text="Tap clubs in order used. Score = total clubs tapped.", 
                  font=("Helvetica", 9), foreground="gray").pack(pady=(2, 5))
         
         self.running_total_var = tk.StringVar(value="Total: 0")
@@ -663,7 +666,7 @@ class GolfApp:
         canvas.pack(side="left", fill="both", expand=True)
         canvas.create_window((0, 0), window=frame, anchor="nw")
         
-        # Column headers - simplified to Score and Clubs Used
+        # Column headers - Score is now auto-calculated from clubs
         headers = ["Hole", "Yds", "Par", "Score", "Clubs Used"]
         for col, h in enumerate(headers):
             ttk.Label(frame, text=h, font=("Helvetica", 9, "bold")).grid(row=0, column=col, padx=3)
@@ -671,6 +674,7 @@ class GolfApp:
         # Data storage
         self.score_entries = []
         self.score_vars = []
+        self.score_labels = []  # Display auto-calculated scores
         self.stg_vars = []  # Strokes to green (auto-calculated)
         self.putt_vars = []  # Putts (auto-calculated)
         self.clubs_used_data = []  # List of clubs used per hole
@@ -692,11 +696,13 @@ class GolfApp:
             ttk.Label(frame, text=yard_text).grid(row=row, column=1, padx=3)
             ttk.Label(frame, text=f"{par}").grid(row=row, column=2, padx=3)
             
-            # Score entry
-            score_var = tk.StringVar()
-            score_var.trace_add("write", lambda *args: self.update_running_total())
+            # Score display (auto-calculated from clubs)
+            score_var = tk.StringVar(value="-")
             self.score_vars.append(score_var)
-            ttk.Entry(frame, width=4, textvariable=score_var).grid(row=row, column=3, padx=3, pady=2)
+            score_label = ttk.Label(frame, textvariable=score_var, width=4, anchor='center', 
+                                   font=("Helvetica", 10, "bold"))
+            score_label.grid(row=row, column=3, padx=3, pady=2)
+            self.score_labels.append(score_label)
             
             # Hidden strokes to green and putts (will be auto-calculated from clubs)
             stg_var = tk.StringVar()
@@ -845,6 +851,16 @@ class GolfApp:
             else:
                 display = "Select..."
             label_widget.config(text=display)
+            
+            # Auto-update score from club count
+            score = len(temp_clubs)
+            if score > 0:
+                self.score_vars[hole_idx].set(str(score))
+            else:
+                self.score_vars[hole_idx].set("-")
+            
+            # Update running total
+            self.update_running_total()
             popup.destroy()
         
         ttk.Button(btn_frame, text="Save", command=save_and_close).pack(side='left', padx=5)
@@ -854,7 +870,11 @@ class GolfApp:
         update_stats()
 
     def update_running_total(self):
-        total = sum(int(var.get()) for var in self.score_vars if var.get().isdigit())
+        total = 0
+        for var in self.score_vars:
+            val = var.get()
+            if val.isdigit():
+                total += int(val)
         par = sum(self.selected_course["pars"][i] for i in self.holes_to_score)
         diff = total - par
         diff_str = f"+{diff}" if diff > 0 else str(diff)
@@ -884,25 +904,25 @@ class GolfApp:
         self._save_round(scores, detailed_stats)
     
     def submit_detailed_round(self):
-        """Submit a round with detailed entry. Putts and strokes-to-green auto-calculated from clubs."""
+        """Submit a round with detailed entry. Score = number of clubs used."""
         scores = []
         detailed_stats = []
         
         for idx in range(len(self.holes_to_score)):
-            score_v = self.score_vars[idx].get().strip()
             clubs = self.clubs_used_data[idx]
             
+            # Score is the number of clubs used
+            score = len(clubs) if clubs else None
+            
             if self.is_serious:
-                try:
-                    score = int(score_v)
-                    scores.append(score)
-                except ValueError:
-                    return messagebox.showerror("Error", "All scores must be numbers for serious rounds.")
+                if not clubs:
+                    return messagebox.showerror("Error", f"Hole {self.holes_to_score[idx]+1}: Please select clubs used for all holes in serious rounds.")
+                scores.append(score)
             else:
-                scores.append(int(score_v) if score_v.isdigit() else None)
+                scores.append(score)
             
             # Build detailed stats - auto-calculate from clubs
-            hole_stats = {"score": scores[-1] if scores else None}
+            hole_stats = {"score": score}
             
             # Auto-calculate putts: count occurrences of "Putter" in clubs list
             putts = sum(1 for c in clubs if c.lower() == "putter")
@@ -968,6 +988,7 @@ class GolfApp:
 
         self.backend.rounds.append(rd)
         save_json(ROUNDS_FILE, self.backend.rounds)
+        self.backend.invalidate_stats_cache()  # Ensure stats are recalculated
         self.log_window.destroy()
         self.show_debrief(rd)
 

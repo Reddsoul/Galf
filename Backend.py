@@ -683,47 +683,68 @@ class GolfBackend:
         Calculate handicap index using serious, solo rounds (both 9 and 18 hole).
         Uses the official USGA/WHS formula with the handicap table adjustments.
         9-hole rounds are converted to 18-hole equivalents using expected score.
+        
+        When no 18-hole rounds exist, 9-hole rounds are combined in pairs or
+        doubled (as approximation) to establish an initial handicap.
         """
-        # First pass: calculate differentials for 18-hole rounds to establish base handicap
-        diffs_18 = []
+        # Collect all eligible rounds separated by hole count
+        rounds_18 = []
+        rounds_9 = []
+        
         for r in self.rounds:
             is_solo = r.get("round_type", "solo") == "solo"
             is_serious = r.get("is_serious", False)
-            is_18 = r.get("holes_played") == 18
-
-            if is_solo and is_serious and is_18:
-                diff = self.calculate_score_differential(r)
-                if diff is not None:
-                    diffs_18.append(diff)
-
-        # Calculate preliminary handicap from 18-hole rounds
+            
+            if is_solo and is_serious:
+                holes = r.get("holes_played", 18)
+                if holes == 18:
+                    rounds_18.append(r)
+                elif holes == 9:
+                    rounds_9.append(r)
+        
+        # First pass: calculate differentials for 18-hole rounds to establish base handicap
+        diffs_18 = []
+        for r in rounds_18:
+            diff = self.calculate_score_differential(r)
+            if diff is not None:
+                diffs_18.append(diff)
+        
+        # Calculate preliminary handicap from 18-hole rounds if we have enough
         preliminary_handicap = None
         if len(diffs_18) >= 3:
             sorted_diffs = sorted(diffs_18)
             preliminary_handicap = self._apply_handicap_table(sorted_diffs)
-
-        # Second pass: include 9-hole rounds using the preliminary handicap
-        all_diffs = []
-        for r in self.rounds:
-            is_solo = r.get("round_type", "solo") == "solo"
-            is_serious = r.get("is_serious", False)
-
-            if is_solo and is_serious:
-                holes = r.get("holes_played", 18)
-                if holes == 18:
-                    diff = self.calculate_score_differential(r)
-                elif holes == 9 and preliminary_handicap is not None:
-                    # Only include 9-hole rounds if we have an established handicap
-                    diff = self.calculate_score_differential(r, preliminary_handicap)
-                else:
-                    continue
-
+        
+        # If no preliminary handicap from 18-hole rounds, try to establish one from 9-hole rounds
+        # by using the doubling approximation method
+        if preliminary_handicap is None and len(rounds_9) >= 3:
+            # Calculate approximate differentials by doubling 9-hole diffs
+            approx_diffs = []
+            for r in rounds_9:
+                diff = self.calculate_score_differential(r, current_handicap=None)
                 if diff is not None:
-                    all_diffs.append(diff)
-
+                    approx_diffs.append(diff)
+            
+            if len(approx_diffs) >= 3:
+                sorted_approx = sorted(approx_diffs)
+                preliminary_handicap = self._apply_handicap_table(sorted_approx)
+        
+        # Second pass: include all rounds using the preliminary handicap (if available)
+        all_diffs = []
+        for r in rounds_18:
+            diff = self.calculate_score_differential(r)
+            if diff is not None:
+                all_diffs.append(diff)
+        
+        for r in rounds_9:
+            # Use preliminary handicap if available, otherwise use doubling approximation
+            diff = self.calculate_score_differential(r, preliminary_handicap)
+            if diff is not None:
+                all_diffs.append(diff)
+        
         if len(all_diffs) < 3:
             return None
-
+        
         all_diffs.sort()
         return self._apply_handicap_table(all_diffs)
 
