@@ -1,6 +1,6 @@
 from datetime import datetime, date
 
-from Backend import GolfBackend, save_json, ROUNDS_FILE, generate_scorecard_data, PDF_AVAILABLE
+from Backend import GolfBackend, save_json, ROUNDS_FILE, generate_scorecard_data, PDF_AVAILABLE, CLUB_CATEGORIES
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -258,7 +258,7 @@ class GolfApp:
 
         self.tee_entries = []
         existing_tb = self.editing_course["tee_boxes"] if self.editing_course else []
-        common_colors = ["Black", "Blue", "White", "Gold", "Red"]
+        common_colors = ["Black", "Blue", "White", "Gold", "Yellow", "Green", "Red"]
 
         for i in range(count):
             row = i + 2
@@ -374,67 +374,127 @@ class GolfApp:
 
         self.log_window = tk.Toplevel(self.root)
         self.log_window.title("Log a Round")
-        self.log_window.geometry("420x520")
+        self.log_window.geometry("450x620")
 
         frame = ttk.Frame(self.log_window, padding=20)
         frame.pack(fill='both', expand=True)
 
         ttk.Label(frame, text="Log New Round", style="Title.TLabel").grid(row=0, column=0, columnspan=2, pady=(0, 15))
 
-        ttk.Label(frame, text="Course:").grid(row=1, column=0, sticky='e', pady=5)
-        names = [c["name"] for c in courses]
+        # Club (facility) selection - FIRST
+        ttk.Label(frame, text="Club/Facility:").grid(row=1, column=0, sticky='e', pady=5)
+        clubs = sorted(list(set(c.get("club", "") for c in courses if c.get("club"))))
+        if "" in clubs:
+            clubs.remove("")
+        clubs = ["All Clubs"] + clubs
+        self.club_facility_var = tk.StringVar(value="All Clubs")
+        self.club_facility_menu = ttk.Combobox(frame, textvariable=self.club_facility_var, values=clubs, state='readonly', width=25)
+        self.club_facility_menu.grid(row=1, column=1, pady=5)
+        self.club_facility_menu.bind("<<ComboboxSelected>>", self.on_club_facility_selected)
+
+        # Course selection - filtered by club
+        ttk.Label(frame, text="Course:").grid(row=2, column=0, sticky='e', pady=5)
         self.course_var = tk.StringVar()
-        self.course_menu = ttk.Combobox(frame, textvariable=self.course_var, values=names, state='readonly', width=25)
-        self.course_menu.grid(row=1, column=1, pady=5)
+        self.course_menu = ttk.Combobox(frame, textvariable=self.course_var, values=[], state='readonly', width=25)
+        self.course_menu.grid(row=2, column=1, pady=5)
         self.course_menu.bind("<<ComboboxSelected>>", self.update_course_info)
 
-        ttk.Label(frame, text="Tee Box:").grid(row=2, column=0, sticky='e', pady=5)
+        ttk.Label(frame, text="Tee Box:").grid(row=3, column=0, sticky='e', pady=5)
         self.tee_var = tk.StringVar()
         self.tee_menu = ttk.Combobox(frame, textvariable=self.tee_var, state='readonly', width=25)
-        self.tee_menu.grid(row=2, column=1, pady=5)
+        self.tee_menu.grid(row=3, column=1, pady=5)
         self.tee_menu.bind("<<ComboboxSelected>>", self.update_course_info)
 
-        ttk.Label(frame, text="Holes to Play:").grid(row=3, column=0, sticky='e', pady=5)
+        ttk.Label(frame, text="Holes to Play:").grid(row=4, column=0, sticky='e', pady=5)
         self.holes_choice_var = tk.StringVar(value="full_18")
         holes_frame = ttk.Frame(frame)
-        holes_frame.grid(row=3, column=1, sticky='w')
+        holes_frame.grid(row=4, column=1, sticky='w')
         ttk.Radiobutton(holes_frame, text="Full 18", variable=self.holes_choice_var, value="full_18", command=self.update_course_info).pack(side='left')
         ttk.Radiobutton(holes_frame, text="Front 9", variable=self.holes_choice_var, value="front_9", command=self.update_course_info).pack(side='left', padx=5)
         ttk.Radiobutton(holes_frame, text="Back 9", variable=self.holes_choice_var, value="back_9", command=self.update_course_info).pack(side='left')
 
         # DATE PICKER
-        ttk.Label(frame, text="Date:").grid(row=4, column=0, sticky='e', pady=5)
+        ttk.Label(frame, text="Date:").grid(row=5, column=0, sticky='e', pady=5)
 
         self.date_entry = DateEntry(frame, width=23, date_pattern='yyyy-mm-dd', maxdate=date.today())
-        self.date_entry.grid(row=4, column=1, pady=5, sticky='w')
+        self.date_entry.grid(row=5, column=1, pady=5, sticky='w')
 
 
         self.course_handicap_label = ttk.Label(frame, text="Course Handicap: N/A")
-        self.course_handicap_label.grid(row=5, column=0, columnspan=2, pady=2)
+        self.course_handicap_label.grid(row=6, column=0, columnspan=2, pady=2)
 
         self.target_score_label = ttk.Label(frame, text="Target Score: N/A")
-        self.target_score_label.grid(row=6, column=0, columnspan=2, pady=2)
+        self.target_score_label.grid(row=7, column=0, columnspan=2, pady=2)
 
         self.yardage_label = ttk.Label(frame, text="Total Yardage: N/A")
-        self.yardage_label.grid(row=7, column=0, columnspan=2, pady=2)
+        self.yardage_label.grid(row=8, column=0, columnspan=2, pady=2)
 
-        ttk.Separator(frame, orient='horizontal').grid(row=8, column=0, columnspan=2, sticky='ew', pady=10)
+        ttk.Separator(frame, orient='horizontal').grid(row=9, column=0, columnspan=2, sticky='ew', pady=10)
 
-        ttk.Label(frame, text="Round Type:").grid(row=9, column=0, sticky='e', pady=5)
+        ttk.Label(frame, text="Round Type:").grid(row=10, column=0, sticky='e', pady=5)
         self.round_type_var = tk.StringVar(value="solo")
         type_frame = ttk.Frame(frame)
-        type_frame.grid(row=9, column=1, sticky='w')
+        type_frame.grid(row=10, column=1, sticky='w')
         ttk.Radiobutton(type_frame, text="Solo", variable=self.round_type_var, value="solo").pack(side='left')
         ttk.Radiobutton(type_frame, text="Scramble", variable=self.round_type_var, value="scramble").pack(side='left', padx=10)
 
         self.is_serious_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(frame, text="Serious Round (counts toward handicap)", variable=self.is_serious_var).grid(row=10, column=0, columnspan=2, pady=5)
+        ttk.Checkbutton(frame, text="Serious Round (counts toward handicap)", variable=self.is_serious_var).grid(row=11, column=0, columnspan=2, pady=5)
 
-        ttk.Label(frame, text="Notes:").grid(row=11, column=0, sticky='ne', pady=5)
+        # Entry Mode Selection
+        ttk.Separator(frame, orient='horizontal').grid(row=12, column=0, columnspan=2, sticky='ew', pady=10)
+        
+        ttk.Label(frame, text="Entry Mode:", font=("Helvetica", 10, "bold")).grid(row=13, column=0, sticky='e', pady=5)
+        last_mode = self.backend.get_entry_mode()
+        self.entry_mode_var = tk.StringVar(value=last_mode)
+        mode_frame = ttk.Frame(frame)
+        mode_frame.grid(row=13, column=1, sticky='w')
+        ttk.Radiobutton(mode_frame, text="Quick", variable=self.entry_mode_var, value="quick").pack(side='left')
+        ttk.Radiobutton(mode_frame, text="Detailed", variable=self.entry_mode_var, value="detailed").pack(side='left', padx=10)
+        
+        # Mode description
+        self.mode_desc_label = ttk.Label(frame, text="Quick: Scores only", font=("Helvetica", 9), foreground="gray")
+        self.mode_desc_label.grid(row=14, column=0, columnspan=2)
+        self.entry_mode_var.trace_add("write", self.update_mode_description)
+        # Initialize description based on last mode
+        self.update_mode_description()
+
+        ttk.Label(frame, text="Notes:").grid(row=15, column=0, sticky='ne', pady=5)
         self.notes_entry = ttk.Entry(frame, width=30)
-        self.notes_entry.grid(row=11, column=1, pady=5)
+        self.notes_entry.grid(row=15, column=1, pady=5)
 
-        ttk.Button(frame, text="Start Scoring →", command=self.start_round_input).grid(row=12, column=0, columnspan=2, pady=20)
+        ttk.Button(frame, text="Start Scoring →", command=self.start_round_input).grid(row=16, column=0, columnspan=2, pady=20)
+        
+        # Initialize course list AFTER all widgets are created
+        self.on_club_facility_selected()
+    
+    def on_club_facility_selected(self, event=None):
+        """Filter courses based on selected club/facility."""
+        selected_club = self.club_facility_var.get()
+        courses = self.backend.get_courses()
+        
+        if selected_club == "All Clubs":
+            filtered = courses
+        else:
+            filtered = [c for c in courses if c.get("club") == selected_club]
+        
+        course_names = [c["name"] for c in filtered]
+        self.course_menu.config(values=course_names)
+        
+        # Select first course if available
+        if course_names:
+            self.course_var.set(course_names[0])
+            self.update_course_info()
+        else:
+            self.course_var.set("")
+    
+    def update_mode_description(self, *args):
+        """Update the mode description label based on selection."""
+        mode = self.entry_mode_var.get()
+        if mode == "quick":
+            self.mode_desc_label.config(text="Quick: Scores only")
+        else:
+            self.mode_desc_label.config(text="Detailed: Scores + Clubs Used (auto-calculates Putts & To Green)")
 
     def update_course_info(self, _=None):
         name = self.course_var.get()
@@ -487,6 +547,10 @@ class GolfApp:
         self.notes = self.notes_entry.get().strip()
         self.holes_choice = self.holes_choice_var.get()
         self.selected_date = self.date_entry.get_date()
+        self.entry_mode = self.entry_mode_var.get()
+        
+        # Save the entry mode preference
+        self.backend.set_entry_mode(self.entry_mode)
 
         all_pars = self.selected_course["pars"]
         if self.holes_choice == "full_18":
@@ -498,12 +562,21 @@ class GolfApp:
 
         for w in self.log_window.winfo_children():
             w.destroy()
-
+        
+        if self.entry_mode == "detailed":
+            self.start_detailed_round_input()
+        else:
+            self.start_quick_round_input()
+    
+    def start_quick_round_input(self):
+        """Quick entry mode: scores only."""
+        all_pars = self.selected_course["pars"]
         par_total = sum(all_pars[i] for i in self.holes_to_score)
         holes_text = "Front 9" if self.holes_choice == "front_9" else ("Back 9" if self.holes_choice == "back_9" else f"{len(self.holes_to_score)} Holes")
-        yardages = self.selected_course.get("yardages", {}).get(tee_color, [])
+        yardages = self.selected_course.get("yardages", {}).get(self.selected_tee, [])
 
-        canvas = tk.Canvas(self.log_window, height=450, width=380)
+        self.log_window.geometry("380x550")
+        canvas = tk.Canvas(self.log_window, height=450, width=350)
         scrollbar = ttk.Scrollbar(self.log_window, orient="vertical", command=canvas.yview)
         frame = ttk.Frame(canvas, padding=15)
 
@@ -513,21 +586,24 @@ class GolfApp:
         canvas.create_window((0, 0), window=frame, anchor="nw")
 
         ttk.Label(frame, text=f"{self.selected_course['name']}", style="Header.TLabel").grid(row=0, column=0, columnspan=4)
-        ttk.Label(frame, text=f"{holes_text} • Par {par_total} • {tee_color} Tees").grid(row=1, column=0, columnspan=4, pady=(0, 10))
+        ttk.Label(frame, text=f"{holes_text} • Par {par_total} • {self.selected_tee} Tees").grid(row=1, column=0, columnspan=4, pady=(0, 10))
+        ttk.Label(frame, text="Quick Entry Mode", foreground="blue", font=("Helvetica", 9)).grid(row=2, column=0, columnspan=4)
 
         self.running_total_var = tk.StringVar(value="Total: 0")
-        ttk.Label(frame, textvariable=self.running_total_var, font=("Helvetica", 12, "bold")).grid(row=2, column=0, columnspan=4)
+        ttk.Label(frame, textvariable=self.running_total_var, font=("Helvetica", 12, "bold")).grid(row=3, column=0, columnspan=4)
 
-        ttk.Label(frame, text="Hole", font=("Helvetica", 9, "bold")).grid(row=3, column=0)
-        ttk.Label(frame, text="Yds", font=("Helvetica", 9, "bold")).grid(row=3, column=1)
-        ttk.Label(frame, text="Par", font=("Helvetica", 9, "bold")).grid(row=3, column=2)
-        ttk.Label(frame, text="Score", font=("Helvetica", 9, "bold")).grid(row=3, column=3)
+        ttk.Label(frame, text="Hole", font=("Helvetica", 9, "bold")).grid(row=4, column=0)
+        ttk.Label(frame, text="Yds", font=("Helvetica", 9, "bold")).grid(row=4, column=1)
+        ttk.Label(frame, text="Par", font=("Helvetica", 9, "bold")).grid(row=4, column=2)
+        ttk.Label(frame, text="Score", font=("Helvetica", 9, "bold")).grid(row=4, column=3)
 
         self.score_entries = []
         self.score_vars = []
+        self.putt_vars = []  # Keep for compatibility but don't display
+        self.putt_entries = []
 
         for idx, hole_num in enumerate(self.holes_to_score):
-            row = idx + 4
+            row = idx + 5
             par = all_pars[hole_num]
             yard_text = str(yardages[hole_num]) if yardages and hole_num < len(yardages) and yardages[hole_num] > 0 else ""
 
@@ -535,18 +611,247 @@ class GolfApp:
             ttk.Label(frame, text=yard_text).grid(row=row, column=1, padx=5)
             ttk.Label(frame, text=f"{par}").grid(row=row, column=2, padx=5)
 
-            var = tk.StringVar()
-            var.trace_add("write", lambda *args: self.update_running_total())
-            self.score_vars.append(var)
+            score_var = tk.StringVar()
+            score_var.trace_add("write", lambda *args: self.update_running_total())
+            self.score_vars.append(score_var)
 
-            e = ttk.Entry(frame, width=5, textvariable=var)
-            e.grid(row=row, column=3, padx=5, pady=2)
-            self.score_entries.append(e)
+            score_e = ttk.Entry(frame, width=5, textvariable=score_var)
+            score_e.grid(row=row, column=3, padx=5, pady=2)
+            self.score_entries.append(score_e)
+            
+            # Empty putt var for compatibility (not displayed)
+            putt_var = tk.StringVar()
+            self.putt_vars.append(putt_var)
 
-        ttk.Button(frame, text="✓ Submit Round", command=self.submit_round).grid(row=len(self.holes_to_score)+5, column=0, columnspan=4, pady=20)
+        ttk.Button(frame, text="✓ Submit Round", command=self.submit_quick_round).grid(row=len(self.holes_to_score)+6, column=0, columnspan=4, pady=20)
 
         frame.update_idletasks()
         canvas.config(scrollregion=canvas.bbox("all"))
+    
+    def start_detailed_round_input(self):
+        """Detailed entry mode: scores, strokes to green, putts, and clubs used."""
+        all_pars = self.selected_course["pars"]
+        par_total = sum(all_pars[i] for i in self.holes_to_score)
+        holes_text = "Front 9" if self.holes_choice == "front_9" else ("Back 9" if self.holes_choice == "back_9" else f"{len(self.holes_to_score)} Holes")
+        yardages = self.selected_course.get("yardages", {}).get(self.selected_tee, [])
+
+        self.log_window.geometry("550x650")
+        
+        # Main container
+        main_frame = ttk.Frame(self.log_window, padding=10)
+        main_frame.pack(fill='both', expand=True)
+        
+        # Header
+        ttk.Label(main_frame, text=f"{self.selected_course['name']}", style="Header.TLabel").pack()
+        ttk.Label(main_frame, text=f"{holes_text} • Par {par_total} • {self.selected_tee} Tees").pack(pady=(0, 5))
+        ttk.Label(main_frame, text="Detailed Entry Mode", foreground="green", font=("Helvetica", 9, "bold")).pack()
+        
+        # Instructions for auto-calculation
+        ttk.Label(main_frame, text="Tap clubs in order used (including Putter). Putts & To Green auto-calculated.", 
+                 font=("Helvetica", 9), foreground="gray").pack(pady=(2, 5))
+        
+        self.running_total_var = tk.StringVar(value="Total: 0")
+        ttk.Label(main_frame, textvariable=self.running_total_var, font=("Helvetica", 12, "bold")).pack(pady=5)
+        
+        # Scrollable area
+        canvas = tk.Canvas(main_frame, height=450)
+        scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
+        frame = ttk.Frame(canvas, padding=10)
+        
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        canvas.create_window((0, 0), window=frame, anchor="nw")
+        
+        # Column headers - simplified to Score and Clubs Used
+        headers = ["Hole", "Yds", "Par", "Score", "Clubs Used"]
+        for col, h in enumerate(headers):
+            ttk.Label(frame, text=h, font=("Helvetica", 9, "bold")).grid(row=0, column=col, padx=3)
+        
+        # Data storage
+        self.score_entries = []
+        self.score_vars = []
+        self.stg_vars = []  # Strokes to green (auto-calculated)
+        self.putt_vars = []  # Putts (auto-calculated)
+        self.clubs_used_data = []  # List of clubs used per hole
+        self.clubs_labels = []  # Labels to display clubs
+        
+        # Get player's bag for club buttons (include Putter)
+        self.player_clubs = self.backend.get_clubs_sorted_by_distance()
+        club_names = [c["name"] for c in self.player_clubs]
+        # Always add Putter if not in bag
+        if "Putter" not in club_names:
+            club_names.append("Putter")
+        
+        for idx, hole_num in enumerate(self.holes_to_score):
+            row = idx + 1
+            par = all_pars[hole_num]
+            yard_text = str(yardages[hole_num]) if yardages and hole_num < len(yardages) and yardages[hole_num] > 0 else ""
+            
+            ttk.Label(frame, text=f"{hole_num+1}").grid(row=row, column=0, padx=3)
+            ttk.Label(frame, text=yard_text).grid(row=row, column=1, padx=3)
+            ttk.Label(frame, text=f"{par}").grid(row=row, column=2, padx=3)
+            
+            # Score entry
+            score_var = tk.StringVar()
+            score_var.trace_add("write", lambda *args: self.update_running_total())
+            self.score_vars.append(score_var)
+            ttk.Entry(frame, width=4, textvariable=score_var).grid(row=row, column=3, padx=3, pady=2)
+            
+            # Hidden strokes to green and putts (will be auto-calculated from clubs)
+            stg_var = tk.StringVar()
+            self.stg_vars.append(stg_var)
+            
+            putt_var = tk.StringVar()
+            self.putt_vars.append(putt_var)
+            
+            # Clubs used - button to open selection
+            self.clubs_used_data.append([])
+            clubs_label = ttk.Label(frame, text="Select...", foreground="blue", cursor="hand2", width=18)
+            clubs_label.grid(row=row, column=4, padx=3, pady=2, sticky='w')
+            clubs_label.bind("<Button-1>", lambda e, i=idx, lbl=clubs_label: self.open_club_selector(i, lbl))
+            self.clubs_labels.append(clubs_label)
+        
+        ttk.Button(frame, text="✓ Submit Round", command=self.submit_detailed_round).grid(
+            row=len(self.holes_to_score)+2, column=0, columnspan=5, pady=20)
+        
+        frame.update_idletasks()
+        canvas.config(scrollregion=canvas.bbox("all"))
+    
+    def open_club_selector(self, hole_idx, label_widget):
+        """Open a popup to select clubs used for a hole."""
+        popup = tk.Toplevel(self.log_window)
+        popup.title(f"Clubs Used - Hole {self.holes_to_score[hole_idx] + 1}")
+        popup.geometry("380x450")
+        popup.transient(self.log_window)
+        
+        frame = ttk.Frame(popup, padding=15)
+        frame.pack(fill='both', expand=True)
+        
+        ttk.Label(frame, text="Tap clubs in order used:", font=("Helvetica", 10, "bold")).pack(pady=(0, 5))
+        ttk.Label(frame, text="Putts = # of Putter taps | To Green = clubs before Putter", 
+                 font=("Helvetica", 9), foreground="gray").pack()
+        
+        # Selected clubs display
+        selected_frame = ttk.LabelFrame(frame, text="Selected Order", padding=5)
+        selected_frame.pack(fill='x', pady=10)
+        
+        selected_var = tk.StringVar(value=" → ".join(self.clubs_used_data[hole_idx]) if self.clubs_used_data[hole_idx] else "None")
+        selected_label = ttk.Label(selected_frame, textvariable=selected_var, wraplength=300)
+        selected_label.pack()
+        
+        # Local list for this selection
+        temp_clubs = list(self.clubs_used_data[hole_idx])
+        
+        def add_club(club_name):
+            temp_clubs.append(club_name)
+            selected_var.set(" → ".join(temp_clubs))
+        
+        def clear_clubs():
+            temp_clubs.clear()
+            selected_var.set("None")
+        
+        def undo_last():
+            if temp_clubs:
+                temp_clubs.pop()
+                selected_var.set(" → ".join(temp_clubs) if temp_clubs else "None")
+        
+        # Club buttons in a grid
+        clubs_frame = ttk.Frame(frame)
+        clubs_frame.pack(fill='both', expand=True, pady=10)
+        
+        # Get player's clubs (excluding Putter for now, we'll add it specially)
+        player_clubs = [c["name"] for c in self.backend.get_clubs_sorted_by_distance() if c["name"].lower() != "putter"]
+        
+        # If no clubs in bag, show default list
+        if not player_clubs:
+            player_clubs = ["Driver", "3 Wood", "5 Wood", "Hybrid", "4 Iron", "5 Iron", "6 Iron", 
+                          "7 Iron", "8 Iron", "9 Iron", "PW", "GW", "SW", "LW"]
+        
+        # Always add Putter at the end
+        player_clubs.append("Putter")
+        
+        col = 0
+        row = 0
+        for club in player_clubs:
+            # Make Putter button stand out
+            if club == "Putter":
+                btn = ttk.Button(clubs_frame, text="🏌️ Putter", width=10, 
+                               command=lambda c=club: add_club(c))
+            else:
+                btn = ttk.Button(clubs_frame, text=club, width=10, 
+                               command=lambda c=club: add_club(c))
+            btn.grid(row=row, column=col, padx=2, pady=2)
+            col += 1
+            if col >= 3:
+                col = 0
+                row += 1
+        
+        # Stats display (auto-calculated)
+        stats_frame = ttk.LabelFrame(frame, text="Auto-Calculated Stats", padding=5)
+        stats_frame.pack(fill='x', pady=5)
+        
+        stats_var = tk.StringVar(value="Putts: 0 | To Green: 0")
+        stats_label = ttk.Label(stats_frame, textvariable=stats_var, font=("Helvetica", 10))
+        stats_label.pack()
+        
+        def update_stats():
+            putts = sum(1 for c in temp_clubs if c.lower() == "putter")
+            # To green = clubs used before first putter (all non-putter clubs before putting)
+            to_green = 0
+            for c in temp_clubs:
+                if c.lower() == "putter":
+                    break
+                to_green += 1
+            stats_var.set(f"Putts: {putts} | To Green: {to_green}")
+        
+        # Override add_club to update stats
+        def add_club_with_stats(club_name):
+            temp_clubs.append(club_name)
+            selected_var.set(" → ".join(temp_clubs))
+            update_stats()
+        
+        def clear_clubs_with_stats():
+            temp_clubs.clear()
+            selected_var.set("None")
+            update_stats()
+        
+        def undo_last_with_stats():
+            if temp_clubs:
+                temp_clubs.pop()
+                selected_var.set(" → ".join(temp_clubs) if temp_clubs else "None")
+                update_stats()
+        
+        # Rebind buttons to use stats-updating versions
+        for widget in clubs_frame.winfo_children():
+            if isinstance(widget, ttk.Button):
+                club_text = widget.cget("text").replace("🏌️ ", "")
+                widget.config(command=lambda c=club_text: add_club_with_stats(c))
+        
+        # Action buttons
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(pady=10)
+        
+        ttk.Button(btn_frame, text="Undo", command=undo_last_with_stats).pack(side='left', padx=5)
+        ttk.Button(btn_frame, text="Clear", command=clear_clubs_with_stats).pack(side='left', padx=5)
+        
+        def save_and_close():
+            self.clubs_used_data[hole_idx] = temp_clubs
+            # Show abbreviated club list
+            if temp_clubs:
+                display = ", ".join(temp_clubs[:2])
+                if len(temp_clubs) > 2:
+                    display += f"... ({len(temp_clubs)})"
+            else:
+                display = "Select..."
+            label_widget.config(text=display)
+            popup.destroy()
+        
+        ttk.Button(btn_frame, text="Save", command=save_and_close).pack(side='left', padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=popup.destroy).pack(side='left', padx=5)
+        
+        # Initialize stats display
+        update_stats()
 
     def update_running_total(self):
         total = sum(int(var.get()) for var in self.score_vars if var.get().isdigit())
@@ -555,18 +860,73 @@ class GolfApp:
         diff_str = f"+{diff}" if diff > 0 else str(diff)
         self.running_total_var.set(f"Total: {total} ({diff_str})")
 
-    def submit_round(self):
+    def submit_quick_round(self):
+        """Submit a round with quick entry (scores only)."""
         scores = []
-        for e in self.score_entries:
+        detailed_stats = []
+        
+        for idx, e in enumerate(self.score_entries):
             v = e.get().strip()
+            
             if self.is_serious:
                 try:
-                    scores.append(int(v))
+                    score = int(v)
+                    scores.append(score)
                 except ValueError:
                     return messagebox.showerror("Error", "All scores must be numbers for serious rounds.")
             else:
                 scores.append(int(v) if v.isdigit() else None)
+            
+            # Build minimal detailed stats (just score for quick mode)
+            hole_stats = {"score": scores[-1] if scores else None}
+            detailed_stats.append(hole_stats)
 
+        self._save_round(scores, detailed_stats)
+    
+    def submit_detailed_round(self):
+        """Submit a round with detailed entry. Putts and strokes-to-green auto-calculated from clubs."""
+        scores = []
+        detailed_stats = []
+        
+        for idx in range(len(self.holes_to_score)):
+            score_v = self.score_vars[idx].get().strip()
+            clubs = self.clubs_used_data[idx]
+            
+            if self.is_serious:
+                try:
+                    score = int(score_v)
+                    scores.append(score)
+                except ValueError:
+                    return messagebox.showerror("Error", "All scores must be numbers for serious rounds.")
+            else:
+                scores.append(int(score_v) if score_v.isdigit() else None)
+            
+            # Build detailed stats - auto-calculate from clubs
+            hole_stats = {"score": scores[-1] if scores else None}
+            
+            # Auto-calculate putts: count occurrences of "Putter" in clubs list
+            putts = sum(1 for c in clubs if c.lower() == "putter")
+            if putts > 0:
+                hole_stats["putts"] = putts
+            
+            # Auto-calculate strokes to green: number of clubs used before first putter
+            strokes_to_green = 0
+            for c in clubs:
+                if c.lower() == "putter":
+                    break
+                strokes_to_green += 1
+            if strokes_to_green > 0:
+                hole_stats["strokes_to_green"] = strokes_to_green
+            
+            if clubs:
+                hole_stats["clubs_used"] = clubs
+            
+            detailed_stats.append(hole_stats)
+        
+        self._save_round(scores, detailed_stats)
+    
+    def _save_round(self, scores, detailed_stats):
+        """Common method to save round data."""
         total = sum(s for s in scores if s is not None)
         par = sum(self.selected_course["pars"][i] for i in self.holes_to_score)
         holes_played = 9 if self.holes_choice in ["front_9", "back_9"] else (18 if len(scores) >= 18 else len(scores))
@@ -576,16 +936,31 @@ class GolfApp:
         tee_slope = box["slope"]
 
         full_scores = [None] * len(self.selected_course["pars"])
+        full_detailed = [{}] * len(self.selected_course["pars"])
+        
         for idx, hole_num in enumerate(self.holes_to_score):
             full_scores[hole_num] = scores[idx]
+            if idx < len(detailed_stats):
+                full_detailed[hole_num] = detailed_stats[idx]
 
         date_str = self.selected_date.strftime("%Y-%m-%d") + " " + datetime.now().strftime("%H:%M")
 
         rd = {
-            "course_name": self.selected_course["name"], "tee_color": self.selected_tee, "scores": full_scores,
-            "is_serious": self.is_serious, "round_type": self.round_type, "notes": self.notes,
-            "holes_played": holes_played, "holes_choice": self.holes_choice, "total_score": total,
-            "par": par, "tee_rating": tee_rating, "tee_slope": tee_slope, "date": date_str
+            "course_name": self.selected_course["name"], 
+            "tee_color": self.selected_tee, 
+            "scores": full_scores,
+            "is_serious": self.is_serious, 
+            "round_type": self.round_type, 
+            "notes": self.notes,
+            "holes_played": holes_played, 
+            "holes_choice": self.holes_choice, 
+            "total_score": total,
+            "par": par, 
+            "tee_rating": tee_rating, 
+            "tee_slope": tee_slope, 
+            "date": date_str,
+            "entry_mode": self.entry_mode,
+            "detailed_stats": full_detailed
         }
 
         full_ch = box.get("handicap", 0)
@@ -736,8 +1111,10 @@ class GolfApp:
         ttk.Button(frame, text="Export", command=do_export).pack(pady=20)
         ttk.Button(frame, text="Cancel", command=win.destroy).pack()
 
-    def export_scorecard_pdf(self, round_data):
+    def export_scorecard_pdf(self, round_data, include_detailed=False):
         sc_data = generate_scorecard_data(self.backend, round_data)
+        detailed_stats = round_data.get("detailed_stats", []) if include_detailed else []
+        
         filepath = filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF files", "*.pdf")],
             initialfile=f"scorecard_{sc_data['date'][:10]}_{sc_data['course_name'].replace(' ', '_')}.pdf")
         if not filepath:
@@ -767,6 +1144,33 @@ class GolfApp:
                     yard_row = ['Yards'] + [str(y) if y else '-' for y in front_9['yardages']] + [str(front_9['yards_total'])]
                     rows.append(yard_row)
                 rows.append(score_row)
+                
+                # Add detailed stats rows if requested
+                if detailed_stats:
+                    has_putts = any(detailed_stats[i].get("putts") is not None for i in range(min(9, len(detailed_stats))) if i < len(detailed_stats) and detailed_stats[i])
+                    has_stg = any(detailed_stats[i].get("strokes_to_green") is not None for i in range(min(9, len(detailed_stats))) if i < len(detailed_stats) and detailed_stats[i])
+                    
+                    if has_putts:
+                        putts_row = ['Putts']
+                        total_putts = 0
+                        for i in range(9):
+                            if i < len(detailed_stats) and detailed_stats[i] and detailed_stats[i].get("putts") is not None:
+                                putts_row.append(str(detailed_stats[i]["putts"]))
+                                total_putts += detailed_stats[i]["putts"]
+                            else:
+                                putts_row.append("-")
+                        putts_row.append(str(total_putts))
+                        rows.append(putts_row)
+                    
+                    if has_stg:
+                        stg_row = ['To Green']
+                        for i in range(9):
+                            if i < len(detailed_stats) and detailed_stats[i] and detailed_stats[i].get("strokes_to_green") is not None:
+                                stg_row.append(str(detailed_stats[i]["strokes_to_green"]))
+                            else:
+                                stg_row.append("-")
+                        stg_row.append("-")
+                        rows.append(stg_row)
 
                 table = Table(rows)
                 table.setStyle(TableStyle([
@@ -789,6 +1193,33 @@ class GolfApp:
                     yard_row = ['Yards'] + [str(y) if y else '-' for y in back_9['yardages']] + [str(back_9['yards_total'])]
                     rows.append(yard_row)
                 rows.append(score_row)
+                
+                # Add detailed stats rows if requested for back 9
+                if detailed_stats and len(detailed_stats) > 9:
+                    has_putts = any(detailed_stats[i].get("putts") is not None for i in range(9, min(18, len(detailed_stats))) if i < len(detailed_stats) and detailed_stats[i])
+                    has_stg = any(detailed_stats[i].get("strokes_to_green") is not None for i in range(9, min(18, len(detailed_stats))) if i < len(detailed_stats) and detailed_stats[i])
+                    
+                    if has_putts:
+                        putts_row = ['Putts']
+                        total_putts = 0
+                        for i in range(9, 18):
+                            if i < len(detailed_stats) and detailed_stats[i] and detailed_stats[i].get("putts") is not None:
+                                putts_row.append(str(detailed_stats[i]["putts"]))
+                                total_putts += detailed_stats[i]["putts"]
+                            else:
+                                putts_row.append("-")
+                        putts_row.append(str(total_putts))
+                        rows.append(putts_row)
+                    
+                    if has_stg:
+                        stg_row = ['To Green']
+                        for i in range(9, 18):
+                            if i < len(detailed_stats) and detailed_stats[i] and detailed_stats[i].get("strokes_to_green") is not None:
+                                stg_row.append(str(detailed_stats[i]["strokes_to_green"]))
+                            else:
+                                stg_row.append("-")
+                        stg_row.append("-")
+                        rows.append(stg_row)
 
                 table = Table(rows)
                 table.setStyle(TableStyle([
@@ -810,15 +1241,23 @@ class GolfApp:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to export PDF:\n{str(e)}")
 
-    def export_scorecard_image(self, round_data):
+    def export_scorecard_image(self, round_data, include_detailed=False):
         sc_data = generate_scorecard_data(self.backend, round_data)
+        detailed_stats = round_data.get("detailed_stats", []) if include_detailed else []
+        has_detailed = bool(detailed_stats and any(
+            ds.get("putts") is not None or ds.get("strokes_to_green") is not None 
+            for ds in detailed_stats if ds
+        ))
+        
         filepath = filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("PNG files", "*.png")],
             initialfile=f"scorecard_{sc_data['date'][:10]}_{sc_data['course_name'].replace(' ', '_')}.png")
         if not filepath:
             return
 
         try:
-            width, height = 800, 500
+            # Increase height if detailed stats
+            width = 800
+            height = 600 if has_detailed else 500
             img = Image.new('RGB', (width, height), color='white')
             draw = ImageDraw.Draw(img)
 
@@ -936,9 +1375,25 @@ class GolfApp:
 
         win = tk.Toplevel(self.scorecards_window)
         win.title(f"Scorecard - {rd['course_name']}")
-        win.geometry("500x550")
+        win.geometry("650x700")
 
-        frame = ttk.Frame(win, padding=20)
+        # Create scrollable frame
+        canvas = tk.Canvas(win)
+        scrollbar = ttk.Scrollbar(win, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        
+        frame = ttk.Frame(scrollable_frame, padding=20)
         frame.pack(fill='both', expand=True)
 
         diff = rd['total_score'] - rd.get('par', 72)
@@ -964,7 +1419,8 @@ class GolfApp:
             f"Target: {rd.get('target_score', 'N/A')}",
             f"Tee: {rd.get('tee_color', 'N/A')}",
             f"Type: {rd.get('round_type', 'solo').title()}",
-            f"Serious: {'Yes' if rd['is_serious'] else 'No'}"
+            f"Serious: {'Yes' if rd['is_serious'] else 'No'}",
+            f"Entry Mode: {rd.get('entry_mode', 'quick').title()}"
         ]):
             ttk.Label(info_frame, text=line).grid(row=i//2, column=i%2, padx=10, sticky='w')
 
@@ -977,6 +1433,13 @@ class GolfApp:
         pars = course["pars"] if course else [4] * len(rd["scores"])
         yardages = course.get("yardages", {}).get(rd.get("tee_color", ""), []) if course else []
         has_yardages = bool(yardages and any(y > 0 for y in yardages))
+        
+        # Check for detailed stats
+        detailed_stats = rd.get("detailed_stats", [])
+        has_detailed_stats = any(
+            ds.get("putts") is not None or ds.get("strokes_to_green") is not None or ds.get("clubs_used")
+            for ds in detailed_stats if ds
+        )
 
         # Determine which holes to show based on holes_choice
         scores = rd["scores"]
@@ -1003,17 +1466,44 @@ class GolfApp:
         if not holes_indices:
             ttk.Label(table_frame, text="No hole-by-hole data available.").pack()
         else:
+            # Determine which rows to show
+            current_row = 0
+            
             # Row labels
-            ttk.Label(table_frame, text="Hole", width=6, relief='ridge').grid(row=0, column=0, padx=1)
-            ttk.Label(table_frame, text="Par", width=6, relief='ridge').grid(row=1, column=0, padx=1)
+            ttk.Label(table_frame, text="Hole", width=6, relief='ridge').grid(row=current_row, column=0, padx=1)
+            current_row += 1
+            
+            ttk.Label(table_frame, text="Par", width=6, relief='ridge').grid(row=current_row, column=0, padx=1)
+            current_row += 1
+            
             if has_yardages:
-                ttk.Label(table_frame, text="Yds", width=6, relief='ridge').grid(row=2, column=0, padx=1)
-            ttk.Label(
-                table_frame,
-                text="Score",
-                width=6,
-                relief='ridge'
-            ).grid(row=3 if has_yardages else 2, column=0, padx=1)
+                ttk.Label(table_frame, text="Yds", width=6, relief='ridge').grid(row=current_row, column=0, padx=1)
+                current_row += 1
+            
+            ttk.Label(table_frame, text="Score", width=6, relief='ridge').grid(row=current_row, column=0, padx=1)
+            score_row = current_row
+            current_row += 1
+            
+            # Add detailed stats rows if available
+            putts_row = None
+            stg_row = None
+            clubs_row = None
+            
+            if has_detailed_stats:
+                # Check what detailed data we have
+                has_putts = any(ds.get("putts") is not None for ds in detailed_stats if ds)
+                has_stg = any(ds.get("strokes_to_green") is not None for ds in detailed_stats if ds)
+                has_clubs = any(ds.get("clubs_used") for ds in detailed_stats if ds)
+                
+                if has_putts:
+                    ttk.Label(table_frame, text="Putts", width=6, relief='ridge', foreground='blue').grid(row=current_row, column=0, padx=1)
+                    putts_row = current_row
+                    current_row += 1
+                
+                if has_stg:
+                    ttk.Label(table_frame, text="To Grn", width=6, relief='ridge', foreground='blue').grid(row=current_row, column=0, padx=1)
+                    stg_row = current_row
+                    current_row += 1
 
             # Hole numbers
             for col, hole_idx in enumerate(holes_indices, start=1):
@@ -1047,7 +1537,6 @@ class GolfApp:
                     ).grid(row=2, column=col)
 
             # Scores row
-            score_row = 3 if has_yardages else 2
             for col, hole_idx in enumerate(holes_indices, start=1):
                 sc = scores[hole_idx] if hole_idx < len(scores) else None
                 s_text = str(sc) if sc is not None else "-"
@@ -1057,15 +1546,134 @@ class GolfApp:
                     width=4,
                     relief='ridge'
                 ).grid(row=score_row, column=col)
+            
+            # Detailed stats rows
+            if has_detailed_stats:
+                for col, hole_idx in enumerate(holes_indices, start=1):
+                    ds = detailed_stats[hole_idx] if hole_idx < len(detailed_stats) else {}
+                    
+                    if putts_row is not None:
+                        putts = ds.get("putts")
+                        p_text = str(putts) if putts is not None else "-"
+                        ttk.Label(
+                            table_frame,
+                            text=p_text,
+                            width=4,
+                            relief='ridge',
+                            foreground='blue'
+                        ).grid(row=putts_row, column=col)
+                    
+                    if stg_row is not None:
+                        stg = ds.get("strokes_to_green")
+                        stg_text = str(stg) if stg is not None else "-"
+                        ttk.Label(
+                            table_frame,
+                            text=stg_text,
+                            width=4,
+                            relief='ridge',
+                            foreground='blue'
+                        ).grid(row=stg_row, column=col)
+        
+        # Show round statistics if detailed stats available
+        if has_detailed_stats:
+            stats_frame = ttk.LabelFrame(frame, text="Round Statistics", padding=10)
+            stats_frame.pack(fill='x', pady=(15, 5))
+            
+            # Calculate stats from this round
+            total_putts = sum(ds.get("putts", 0) for ds in detailed_stats if ds and ds.get("putts"))
+            holes_with_putts = sum(1 for ds in detailed_stats if ds and ds.get("putts") is not None)
+            avg_putts = round(total_putts / holes_with_putts, 2) if holes_with_putts > 0 else None
+            
+            three_putts = sum(1 for ds in detailed_stats if ds and ds.get("putts", 0) >= 3)
+            one_putts = sum(1 for ds in detailed_stats if ds and ds.get("putts") == 1)
+            
+            stats_data = []
+            if total_putts > 0:
+                stats_data.append(f"Total Putts: {total_putts}")
+            if avg_putts:
+                stats_data.append(f"Avg Putts: {avg_putts}")
+            if holes_with_putts > 0:
+                stats_data.append(f"3-Putts: {three_putts}")
+                stats_data.append(f"1-Putts: {one_putts}")
+            
+            # Calculate GIR (simplified: strokes_to_green <= par - 2)
+            gir_count = 0
+            gir_holes = 0
+            for idx, ds in enumerate(detailed_stats):
+                if ds and ds.get("strokes_to_green") is not None and idx < len(pars):
+                    gir_holes += 1
+                    if ds["strokes_to_green"] <= pars[idx] - 2:
+                        gir_count += 1
+            if gir_holes > 0:
+                gir_pct = round(gir_count / gir_holes * 100, 1)
+                stats_data.append(f"GIR: {gir_count}/{gir_holes} ({gir_pct}%)")
+            
+            for i, stat in enumerate(stats_data):
+                row = i // 3
+                col = i % 3
+                ttk.Label(stats_frame, text=stat, font=("Helvetica", 10)).grid(row=row, column=col, padx=10, pady=2, sticky='w')
+            
+            # Show clubs used summary
+            all_clubs = []
+            for ds in detailed_stats:
+                if ds and ds.get("clubs_used"):
+                    all_clubs.extend(ds["clubs_used"])
+            
+            if all_clubs:
+                from collections import Counter
+                club_counts = Counter(all_clubs)
+                clubs_summary = ", ".join([f"{club}: {count}" for club, count in club_counts.most_common(5)])
+                ttk.Label(stats_frame, text=f"Top Clubs: {clubs_summary}", 
+                         font=("Helvetica", 9), foreground="gray").grid(row=len(stats_data)//3 + 1, column=0, columnspan=3, pady=(5, 0), sticky='w')
 
         if rd.get("notes"):
             ttk.Label(frame, text="Notes:", style="Header.TLabel").pack(pady=(15, 5))
-            ttk.Label(frame, text=rd["notes"], wraplength=300).pack()
+            ttk.Label(frame, text=rd["notes"], wraplength=400).pack()
 
         btn_frame = ttk.Frame(frame)
         btn_frame.pack(pady=15)
-        ttk.Button(btn_frame, text="Export", command=lambda: self.show_export_dialog(rd)).pack(side='left', padx=5)
+        ttk.Button(btn_frame, text="Export", command=lambda: self.show_export_dialog_with_options(rd, has_detailed_stats)).pack(side='left', padx=5)
         ttk.Button(btn_frame, text="Close", command=win.destroy).pack(side='left', padx=5)
+    
+    def show_export_dialog_with_options(self, round_data, has_detailed_stats):
+        """Show export dialog with option to include detailed stats."""
+        win = tk.Toplevel(self.scorecards_window if hasattr(self, 'scorecards_window') else self.root)
+        win.title("Export Scorecard")
+        win.geometry("350x280" if has_detailed_stats else "300x200")
+
+        frame = ttk.Frame(win, padding=20)
+        frame.pack(fill='both', expand=True)
+
+        ttk.Label(frame, text="Export Scorecard", style="Header.TLabel").pack(pady=(0, 15))
+
+        export_format = tk.StringVar(value="pdf")
+        ttk.Radiobutton(frame, text="PDF Document", variable=export_format, value="pdf").pack(anchor='w')
+        ttk.Radiobutton(frame, text="PNG Image", variable=export_format, value="png").pack(anchor='w')
+        
+        # Option to include detailed stats
+        include_stats = tk.BooleanVar(value=True)
+        if has_detailed_stats:
+            ttk.Separator(frame, orient='horizontal').pack(fill='x', pady=10)
+            ttk.Label(frame, text="Export Options:", font=("Helvetica", 10, "bold")).pack(anchor='w')
+            ttk.Checkbutton(frame, text="Include detailed stats (Putts, To Green)", 
+                           variable=include_stats).pack(anchor='w', padx=10)
+
+        def do_export():
+            fmt = export_format.get()
+            include = include_stats.get() if has_detailed_stats else False
+            win.destroy()
+            if fmt == "pdf":
+                if not REPORTLAB_AVAILABLE:
+                    messagebox.showerror("Error", "PDF export requires reportlab.\nInstall with: pip install reportlab")
+                    return
+                self.export_scorecard_pdf(round_data, include_detailed=include)
+            else:
+                if not PIL_AVAILABLE:
+                    messagebox.showerror("Error", "Image export requires Pillow.\nInstall with: pip install pillow")
+                    return
+                self.export_scorecard_image(round_data, include_detailed=include)
+
+        ttk.Button(frame, text="Export", command=do_export).pack(pady=15)
 
     def open_rulebook(self):
         """Open an enhanced PDF rulebook viewer with Apple HIG-inspired design."""
@@ -2092,24 +2700,47 @@ class GolfApp:
     def open_statistics(self):
         win = tk.Toplevel(self.root)
         win.title("Statistics")
-        win.geometry("450x550")
+        win.geometry("700x700")
 
-        frame = ttk.Frame(win, padding=20)
-        frame.pack(fill='both', expand=True)
-        ttk.Label(frame, text="📊 Your Statistics", style="Title.TLabel").pack(pady=(0, 20))
-
+        # Create notebook for tabs
+        notebook = ttk.Notebook(win)
+        notebook.pack(fill='both', expand=True, padx=10, pady=10)
+        
+        # Tab 1: Overview
+        self._create_overview_tab(notebook)
+        
+        # Tab 2: Advanced Stats (GIR, Putting)
+        self._create_advanced_stats_tab(notebook)
+        
+        # Tab 3: Club Analytics
+        self._create_club_analytics_tab(notebook)
+        
+        # Tab 4: Stroke Leak Analysis
+        self._create_leak_analysis_tab(notebook)
+        
+        ttk.Button(win, text="Close", command=win.destroy).pack(pady=10)
+    
+    def _create_overview_tab(self, notebook):
+        """Create the overview statistics tab."""
+        frame = ttk.Frame(notebook, padding=15)
+        notebook.add(frame, text="Overview")
+        
         stats = self.backend.get_statistics()
         idx = self.backend.calculate_handicap_index()
 
-        stats_frame = ttk.LabelFrame(frame, text="Overview", padding=10)
+        stats_frame = ttk.LabelFrame(frame, text="General Statistics", padding=10)
         stats_frame.pack(fill='x', pady=(0, 15))
 
         stat_lines = [
             ("Handicap Index:", f"{idx:.1f}" if idx else "Not established"),
-            ("Total Rounds:", stats["total_rounds"]), ("18-Hole Rounds:", stats["rounds_18"]),
-            ("9-Hole Rounds:", stats["rounds_9"]), ("Solo Rounds:", stats["solo_rounds"]),
-            ("Scramble Rounds:", stats["scramble_rounds"]), ("Avg Score (18h):", stats["avg_score_18"] or "N/A"),
-            ("Avg Score (9h):", stats.get("avg_score_9") or "N/A"), ("Total Holes Played:", stats.get("total_holes_played", 0)),
+            ("Total Rounds:", stats["total_rounds"]), 
+            ("18-Hole Rounds:", stats["rounds_18"]),
+            ("9-Hole Rounds:", stats["rounds_9"]), 
+            ("Solo Rounds:", stats["solo_rounds"]),
+            ("Scramble Rounds:", stats["scramble_rounds"]), 
+            ("Avg Score (18h):", stats["avg_score_18"] or "N/A"),
+            ("Avg Score (9h):", stats.get("avg_score_9") or "N/A"), 
+            ("Total Holes Played:", stats.get("total_holes_played", 0)),
         ]
 
         for i, (label, value) in enumerate(stat_lines):
@@ -2123,7 +2754,6 @@ class GolfApp:
                 note_frame = ttk.Frame(frame)
                 note_frame.pack(fill='x', pady=5)
                 ttk.Label(note_frame, text=f"ℹ️ Play {remaining} more holes to establish handicap", foreground='blue').pack()
-                ttk.Label(note_frame, text="(You can use any mix of 9 and 18 hole rounds)", font=("Helvetica", 9)).pack()
 
         diffs = self.backend.get_score_differentials()
         if diffs:
@@ -2142,8 +2772,191 @@ class GolfApp:
 
             for d in diffs:
                 tree.insert("", "end", values=(d["diff"], d["score"], d.get("holes", 18), d["course"]))
-
-        ttk.Button(frame, text="Close", command=win.destroy).pack(pady=10)
+    
+    def _create_advanced_stats_tab(self, notebook):
+        """Create the advanced statistics tab with GIR and putting stats."""
+        frame = ttk.Frame(notebook, padding=15)
+        notebook.add(frame, text="Performance")
+        
+        adv_stats = self.backend.get_advanced_statistics()
+        
+        if adv_stats.get("total_holes_tracked", 0) == 0:
+            ttk.Label(frame, text="No detailed stats available yet.", font=("Helvetica", 12)).pack(pady=20)
+            ttk.Label(frame, text="Use 'Detailed' entry mode when logging rounds\nto track strokes to green, putts, and clubs used.", 
+                     font=("Helvetica", 10), foreground="gray").pack()
+            return
+        
+        # GIR Stats
+        gir_frame = ttk.LabelFrame(frame, text="Greens in Regulation (GIR)", padding=10)
+        gir_frame.pack(fill='x', pady=(0, 15))
+        
+        gir_data = [
+            ("Overall GIR:", f"{adv_stats.get('gir_overall')}%" if adv_stats.get('gir_overall') else "N/A"),
+            ("Par 3 GIR:", f"{adv_stats.get('gir_par3')}%" if adv_stats.get('gir_par3') else "N/A"),
+            ("Par 4 GIR:", f"{adv_stats.get('gir_par4')}%" if adv_stats.get('gir_par4') else "N/A"),
+            ("Par 5 GIR:", f"{adv_stats.get('gir_par5')}%" if adv_stats.get('gir_par5') else "N/A"),
+        ]
+        
+        for i, (label, value) in enumerate(gir_data):
+            ttk.Label(gir_frame, text=label).grid(row=i//2, column=(i%2)*2, sticky='e', padx=5, pady=2)
+            ttk.Label(gir_frame, text=value, font=("Helvetica", 10, "bold")).grid(row=i//2, column=(i%2)*2+1, sticky='w', padx=5, pady=2)
+        
+        # Strokes to Green
+        stg_frame = ttk.LabelFrame(frame, text="Average Strokes to Reach Green", padding=10)
+        stg_frame.pack(fill='x', pady=(0, 15))
+        
+        stg_data = [
+            ("Par 3 (target: 1):", f"{adv_stats.get('avg_strokes_to_green_par3')}" if adv_stats.get('avg_strokes_to_green_par3') else "N/A"),
+            ("Par 4 (target: 2):", f"{adv_stats.get('avg_strokes_to_green_par4')}" if adv_stats.get('avg_strokes_to_green_par4') else "N/A"),
+            ("Par 5 (target: 3):", f"{adv_stats.get('avg_strokes_to_green_par5')}" if adv_stats.get('avg_strokes_to_green_par5') else "N/A"),
+        ]
+        
+        for i, (label, value) in enumerate(stg_data):
+            ttk.Label(stg_frame, text=label).grid(row=i, column=0, sticky='e', padx=5, pady=2)
+            ttk.Label(stg_frame, text=value, font=("Helvetica", 10, "bold")).grid(row=i, column=1, sticky='w', padx=5, pady=2)
+        
+        # Putting Stats
+        putt_frame = ttk.LabelFrame(frame, text="Putting Statistics", padding=10)
+        putt_frame.pack(fill='x', pady=(0, 15))
+        
+        putt_data = [
+            ("Avg Putts/Hole:", f"{adv_stats.get('avg_putts_overall')}" if adv_stats.get('avg_putts_overall') else "N/A"),
+            ("3-Putt Rate:", f"{adv_stats.get('three_putt_rate')}%" if adv_stats.get('three_putt_rate') else "N/A"),
+            ("1-Putt Rate:", f"{adv_stats.get('one_putt_rate')}%" if adv_stats.get('one_putt_rate') else "N/A"),
+        ]
+        
+        for i, (label, value) in enumerate(putt_data):
+            ttk.Label(putt_frame, text=label).grid(row=0, column=i*2, sticky='e', padx=5, pady=2)
+            ttk.Label(putt_frame, text=value, font=("Helvetica", 10, "bold")).grid(row=0, column=i*2+1, sticky='w', padx=5, pady=2)
+        
+        # Scrambling
+        scramble_frame = ttk.LabelFrame(frame, text="Scrambling", padding=10)
+        scramble_frame.pack(fill='x')
+        
+        scramble_rate = adv_stats.get('scramble_rate')
+        scramble_opps = adv_stats.get('scramble_opportunities', 0)
+        scramble_succ = adv_stats.get('scramble_successes', 0)
+        
+        ttk.Label(scramble_frame, text="Scramble Rate:").grid(row=0, column=0, sticky='e', padx=5)
+        ttk.Label(scramble_frame, text=f"{scramble_rate}%" if scramble_rate else "N/A", 
+                 font=("Helvetica", 10, "bold")).grid(row=0, column=1, sticky='w', padx=5)
+        ttk.Label(scramble_frame, text=f"({scramble_succ}/{scramble_opps} saves)", 
+                 foreground="gray").grid(row=0, column=2, sticky='w', padx=5)
+        
+        ttk.Label(frame, text=f"Based on {adv_stats.get('total_holes_tracked', 0)} holes tracked", 
+                 foreground="gray", font=("Helvetica", 9)).pack(pady=10)
+    
+    def _create_club_analytics_tab(self, notebook):
+        """Create the club usage analytics tab."""
+        frame = ttk.Frame(notebook, padding=15)
+        notebook.add(frame, text="Club Analytics")
+        
+        club_stats = self.backend.get_club_analytics()
+        
+        if club_stats.get("total_shots", 0) == 0:
+            ttk.Label(frame, text="No club usage data available yet.", font=("Helvetica", 12)).pack(pady=20)
+            ttk.Label(frame, text="Use 'Detailed' entry mode when logging rounds\nto track which clubs you use on each hole.", 
+                     font=("Helvetica", 10), foreground="gray").pack()
+            return
+        
+        # Most Used Clubs
+        usage_frame = ttk.LabelFrame(frame, text="Club Usage (Most → Least)", padding=10)
+        usage_frame.pack(fill='both', expand=True, pady=(0, 15))
+        
+        cols = ("Club", "Shots", "Usage %")
+        tree = ttk.Treeview(usage_frame, columns=cols, show="headings", height=10)
+        tree.heading("Club", text="Club")
+        tree.heading("Shots", text="Shots")
+        tree.heading("Usage %", text="Usage %")
+        tree.column("Club", width=120)
+        tree.column("Shots", width=80, anchor='center')
+        tree.column("Usage %", width=80, anchor='center')
+        tree.pack(fill='both', expand=True)
+        
+        for club_data in club_stats.get("ranked_clubs", []):
+            tree.insert("", "end", values=(club_data["name"], club_data["count"], f"{club_data['percentage']}%"))
+        
+        # Rarely/Never Used
+        insight_frame = ttk.LabelFrame(frame, text="Bag Health Insights", padding=10)
+        insight_frame.pack(fill='x')
+        
+        rarely_used = club_stats.get("rarely_used", [])
+        never_used = club_stats.get("never_used", [])
+        
+        row = 0
+        if rarely_used:
+            rarely_names = [c["name"] for c in rarely_used]
+            ttk.Label(insight_frame, text="⚠️ Rarely used (<3%):", foreground="orange").grid(row=row, column=0, sticky='w', padx=5)
+            ttk.Label(insight_frame, text=", ".join(rarely_names), wraplength=300).grid(row=row, column=1, sticky='w', padx=5)
+            row += 1
+        
+        if never_used:
+            ttk.Label(insight_frame, text="❌ Never used:", foreground="red").grid(row=row, column=0, sticky='w', padx=5)
+            ttk.Label(insight_frame, text=", ".join(never_used), wraplength=300).grid(row=row, column=1, sticky='w', padx=5)
+            row += 1
+        
+        if not rarely_used and not never_used:
+            ttk.Label(insight_frame, text="✅ All clubs in your bag are being used!", foreground="green").grid(row=0, column=0, columnspan=2, padx=5)
+        
+        ttk.Label(frame, text=f"Total shots tracked: {club_stats.get('total_shots', 0)}", 
+                 foreground="gray", font=("Helvetica", 9)).pack(pady=5)
+    
+    def _create_leak_analysis_tab(self, notebook):
+        """Create the stroke leak analysis tab."""
+        frame = ttk.Frame(notebook, padding=15)
+        notebook.add(frame, text="Where You Lose Strokes")
+        
+        insights = self.backend.get_stroke_leak_analysis()
+        
+        if not insights:
+            adv_stats = self.backend.get_advanced_statistics()
+            if adv_stats.get("total_holes_tracked", 0) == 0:
+                ttk.Label(frame, text="No data available for analysis.", font=("Helvetica", 12)).pack(pady=20)
+                ttk.Label(frame, text="Use 'Detailed' entry mode when logging rounds\nto enable stroke leak analysis.", 
+                         font=("Helvetica", 10), foreground="gray").pack()
+            else:
+                ttk.Label(frame, text="🎉 Great job!", font=("Helvetica", 14, "bold")).pack(pady=20)
+                ttk.Label(frame, text="No significant areas of concern detected\nin your recent rounds.", 
+                         font=("Helvetica", 11)).pack()
+            return
+        
+        ttk.Label(frame, text="Areas to Focus On", font=("Helvetica", 14, "bold")).pack(pady=(0, 15))
+        
+        for insight in insights:
+            severity = insight.get("severity", "medium")
+            color = "red" if severity == "high" else "orange"
+            icon = "🔴" if severity == "high" else "🟡"
+            
+            insight_frame = ttk.Frame(frame)
+            insight_frame.pack(fill='x', pady=5)
+            
+            ttk.Label(insight_frame, text=icon, font=("Helvetica", 12)).pack(side='left', padx=(0, 10))
+            ttk.Label(insight_frame, text=insight["message"], wraplength=500, 
+                     font=("Helvetica", 11)).pack(side='left', fill='x')
+        
+        # Summary recommendation
+        ttk.Separator(frame, orient='horizontal').pack(fill='x', pady=15)
+        
+        # Find the biggest leak
+        if insights:
+            biggest = insights[0]
+            area = biggest.get("area", "")
+            
+            rec_frame = ttk.LabelFrame(frame, text="💡 Recommendation", padding=10)
+            rec_frame.pack(fill='x')
+            
+            if "putt" in area:
+                rec_text = "Consider practicing lag putting to reduce 3-putts,\nor work on short putts inside 6 feet."
+            elif "approach" in area or "stg" in area:
+                rec_text = "Focus on approach shot accuracy.\nConsider working on your 100-150 yard shots."
+            elif "tee" in area or "par3" in area:
+                rec_text = "Work on tee shot accuracy on par 3s.\nClub selection might be an area to review."
+            elif "gir" in area:
+                rec_text = "Improving your approach play will help\nyou hit more greens in regulation."
+            else:
+                rec_text = "Review your recent rounds to identify\npatterns in your mistakes."
+            
+            ttk.Label(rec_frame, text=rec_text, font=("Helvetica", 10), wraplength=400).pack()
 
 
 if __name__ == "__main__":

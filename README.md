@@ -1,42 +1,43 @@
 # **Golf Handicap Tracker ⛳**
 
-A modern, privacy-focused Python desktop application for tracking golf rounds, managing courses, and calculating an official-style **USGA/WHS Handicap Index** — fully offline and with no data sharing.
+A clean, privacy-first application for tracking golf rounds, managing courses, and calculating a fully WHS-compliant handicap — built with Python and designed for everyday golfers.
+
+No accounts. No cloud. Your data stays on your machine.
+
+---
 
 ## **Features**
 
-### **Core Tracking**
+### **Core Functionality**
 
-* **Score Tracking** – Log rounds with hole-by-hole scores for 9 or 18 holes
-* **Statistics** – View score differentials, trends, and round summaries
-* **Round Types** – Solo or scramble, with optional “serious” flag for handicap inclusion
-* **Notes** – Attach notes to rounds for post-game review
-
-### **Handicap Engine**
-
-* **Full USGA/WHS 2024-Compliant Handicap Calculation**
-* Automatically converts 9-hole rounds to 18-hole equivalents
-* Selects the appropriate number of differentials based on rounds played
-* Applies WHS adjustments (-2, -1, or none)
+* **Score Tracking** — Log 9 or 18-hole rounds with simple data entry
+* **Automatic Handicap Calculation** — Full USGA/WHS 2024 logic
+* **Statistics Dashboard** — View trend lines, differentials, and scoring insights
+* **Serious vs. Casual Rounds** — Control what counts toward the index
+* **Round Notes** — Add post-game comments or reminders
+* **Editable Round Dates** — Fix or adjust round dates anytime
 
 ### **Course Management**
 
-* Create and store:
-  * Course info
-  * Per-hole par
+* Create courses with:
+  * Hole-by-hole par values
   * Tee boxes (color, rating, slope)
-  * Full yardage maps per tee
+  * **Full yardage maps per tee**
+* Courses are stored locally for quick lookup and editing
 
 ### **Rulebook System**
 
-* **Embedded PGA/USGA Rulebook**
+* Bring your own official USGA rulebook PDF/text
+* App extracts the content and stores a local searchable version
 * **Fast keyword search**
-* **Bookmarks & Notes**
-* Auto-updating rule data
+* **Bookmarks & Notes** per rule
+* Auto-updates the rulebook JSON when new editions are provided
 
-### **Export Tools**
+### **Scorecard Export**
 
-* **PDF Scorecard Export** (ReportLab)
-  Clean, professional scorecards generated automatically.
+* Generate clean **PDF scorecards** using ReportLab
+* Supports 9 or 18 holes
+* Includes totals, course info, tee data, and your notes
 
 ---
 
@@ -53,118 +54,92 @@ A modern, privacy-focused Python desktop application for tracking golf rounds, m
 ### **Install Dependencies**
 
 ```
-pip install tkinter tkcalendar reportlab pillow
+pip install tkcalendar reportlab pillow
 ```
 
 ---
 
 ## **Usage**
 
-### **Adding a Course**
+### **Add a Course**
 
-1. Click **Add New Course**
-2. Enter club & course names
-3. Select **9 or 18 holes**
-4. Set par for each hole
-5. Add tee boxes (color, rating, slope)
-6. Add **yardages per hole per tee**
+1. **Open ****Add Course**
+2. Enter course & tee details
+3. Add par and **yardages** for each hole
+4. Save — the course becomes available for all future rounds
 
----
+### **Log a Round**
 
-### **Logging a Round**
+1. **Open ****Log Round**
+2. Pick course, tee, and holes played (Front 9, Back 9, or 18)
+3. Enter scores
+4. Mark it Serious/Casual
+5. (Optional) Edit the round date
+6. Save or export to PDF
 
-1. Click **Log Round**
-2. Select course and tee box
-3. Choose holes: **Full 18**, **Front 9**, or **Back 9**
-4. Select round type and whether it is *serious*
-5. Enter hole-by-hole scores
-6. Edit the date (if needed)
-7. Save and optionally export the round
-
----
-
-### **Viewing the Rulebook**
+### **Rulebook**
 
 1. Open the **Rulebook** tab
-2. Use:
-   * Global **Search**
-   * **Bookmarks** for frequently-used rules
-   * Personal **Notes** per rule
-3. The rulebook updates automatically when newer revisions are available.
+2. Search instantly by keyword
+3. Bookmark frequently referenced rules
+4. Add personal notes
+5. App updates the JSON rulebook when new data is provided
 
 ---
 
 ## **Handicap Calculation (WHS 2024)**
 
-The app implements full WHS logic, including 9-hole adjustments and differential selection.
+Implements the full WHS formula:
 
-| **Rounds** | **Differentials Used** | **Adjustment** |
-| ---------------- | ---------------------------- | -------------------- |
-| 3                | Lowest 1                     | -2.0                 |
-| 4                | Lowest 1                     | -1.0                 |
-| 5                | Lowest 1                     | 0                    |
-| 6                | Average of lowest 2          | -1.0                 |
-| 7–8             | Average of lowest 2          | 0                    |
-| 9–11            | Average of lowest 3          | 0                    |
-| 12–14           | Average of lowest 4          | 0                    |
-| 15–16           | Average of lowest 5          | 0                    |
-| 17–18           | Average of lowest 6          | 0                    |
-| 19               | Average of lowest 7          | 0                    |
-| 20+              | Average of lowest 8          | 0                    |
+* Converts 9-hole rounds to 18-hole equivalents
+* Uses correct differential selection based on number of rounds
+* Applies WHS adjustments (-2, -1, or none)
+* **Final Index = ****Average of selected diffs × 0.96**
 
-Final Index = (average of selected differentials) × **0.96**
+A golfer-friendly system, internally implemented with developer-clean logic.
 
 ---
 
-## **File Structure**
+## **Developer Notes**
+
+* **Built with a ****Backend/Frontend separation**
+  * **Backend.py** handles data models, JSON storage, and WHS logic
+  * **Frontend.py** handles all tkinter UI components
+* Data is stored in **data/** as human-readable JSON
+* Rulebook ingestion uses text extraction → normalization → indexing
+* PDF generation uses ReportLab tables + custom layout logic
+* Codebase is intentionally small, readable, and mod-friendly
+
+---
+
+## **Project Structure**
 
 ```
 golf-handicap-tracker/
-├── Frontend.py        # GUI application
-├── Backend.py         # Data logic, JSON management, rulebook updater
+├── Frontend.py
+├── Backend.py
 ├── README.md
 └── data/
     ├── courses.json
     ├── rounds.json
     ├── clubs.json
-    ├── rulebook.json      # auto-updated
-    └── exports/           # PDF scorecards
+    ├── rulebook_cache.json
+    └── rulebook.pdf
 ```
-
----
-
-## **Data Storage**
-
-All data is stored locally in JSON:
-
-* **courses.json** — Courses, par values, tee boxes, yardages
-* **rounds.json** — Logged rounds and notes
-* **clubs.json** — Club distance mapping
-* **rulebook.json** — Local copy of the PGA/USGA rules
-
-Your data never leaves your device.
-
----
-
-## **Contributing**
-
-Pull requests are welcome for:
-
-* UI/UX improvements
-* Additional export formats
-* Enhanced analytics or graphs
-* New rulebook tools (offline caching, highlights, etc.)
 
 ---
 
 ## **License**
 
-MIT License — Free for personal and open-source use.
+MIT License — free for personal and open-source use.
 
 ---
 
-## **Acknowledgments**
+## **Contributing**
 
-* **USGA** — Handicap rules and WHS documentation
-* **PGA / R&A** — Official Rules of Golf
-* Inspiration from aviation tools like **FAR/AIM** for search & bookmark design
+Pull requests welcome for:
+
+* UI improvements
+* Analytics/visualization enhancements
+* Additional export formats
+* Additional rulebook utilities

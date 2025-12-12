@@ -21,6 +21,34 @@ RULE_NOTES_FILE = 'data/rule_notes.json'
 RULEBOOK_CACHE_FILE = 'data/rulebook_cache.json'  # Cache for parsed structure
 PDF_ANNOTATIONS_FILE = 'data/pdf_annotations.json'  # Highlights and notes on PDF pages
 PAGE_BOOKMARKS_FILE = 'data/page_bookmarks.json'  # Bookmarked page numbers
+STATS_CACHE_FILE = 'data/stats_cache.json'  # Cached computed statistics
+USER_PREFS_FILE = 'data/user_prefs.json'  # User preferences (entry mode, etc.)
+
+# Club categories for analytics
+CLUB_CATEGORIES = {
+    "Driver": {"category": "driver", "loft": 10.5, "order": 1},
+    "3 Wood": {"category": "wood", "loft": 15, "order": 2},
+    "5 Wood": {"category": "wood", "loft": 18, "order": 3},
+    "7 Wood": {"category": "wood", "loft": 21, "order": 4},
+    "Hybrid": {"category": "hybrid", "loft": 22, "order": 5},
+    "2 Hybrid": {"category": "hybrid", "loft": 18, "order": 5},
+    "3 Hybrid": {"category": "hybrid", "loft": 20, "order": 6},
+    "4 Hybrid": {"category": "hybrid", "loft": 23, "order": 7},
+    "5 Hybrid": {"category": "hybrid", "loft": 26, "order": 8},
+    "2 Iron": {"category": "iron", "loft": 18, "order": 9},
+    "3 Iron": {"category": "iron", "loft": 21, "order": 10},
+    "4 Iron": {"category": "iron", "loft": 24, "order": 11},
+    "5 Iron": {"category": "iron", "loft": 27, "order": 12},
+    "6 Iron": {"category": "iron", "loft": 30, "order": 13},
+    "7 Iron": {"category": "iron", "loft": 34, "order": 14},
+    "8 Iron": {"category": "iron", "loft": 38, "order": 15},
+    "9 Iron": {"category": "iron", "loft": 42, "order": 16},
+    "PW": {"category": "wedge", "loft": 46, "order": 17},
+    "GW": {"category": "wedge", "loft": 50, "order": 18},
+    "SW": {"category": "wedge", "loft": 54, "order": 19},
+    "LW": {"category": "wedge", "loft": 58, "order": 20},
+    "Putter": {"category": "putter", "loft": 3, "order": 21},
+}
 
 
 def load_json(filename):
@@ -418,6 +446,49 @@ class GolfBackend:
         self.rule_notes = load_json(RULE_NOTES_FILE) if os.path.exists(RULE_NOTES_FILE) else {}
         self.pdf_annotations = self._load_pdf_annotations()
         self.page_bookmarks = self._load_page_bookmarks()
+        self.user_prefs = self._load_user_prefs()
+        self.stats_cache = self._load_stats_cache()
+    
+    def _load_user_prefs(self):
+        """Load user preferences from file."""
+        if os.path.exists(USER_PREFS_FILE):
+            try:
+                data = load_json(USER_PREFS_FILE)
+                return data if isinstance(data, dict) else {"entry_mode": "quick"}
+            except:
+                return {"entry_mode": "quick"}
+        return {"entry_mode": "quick"}
+    
+    def save_user_prefs(self):
+        """Save user preferences to file."""
+        save_json(USER_PREFS_FILE, self.user_prefs)
+    
+    def get_entry_mode(self):
+        """Get the last used entry mode (quick or detailed)."""
+        return self.user_prefs.get("entry_mode", "quick")
+    
+    def set_entry_mode(self, mode):
+        """Set the entry mode preference."""
+        self.user_prefs["entry_mode"] = mode
+        self.save_user_prefs()
+    
+    def _load_stats_cache(self):
+        """Load computed stats cache from file."""
+        if os.path.exists(STATS_CACHE_FILE):
+            try:
+                return load_json(STATS_CACHE_FILE)
+            except:
+                return {}
+        return {}
+    
+    def save_stats_cache(self):
+        """Save stats cache to file."""
+        save_json(STATS_CACHE_FILE, self.stats_cache)
+    
+    def invalidate_stats_cache(self):
+        """Mark stats cache as invalid (needs recomputation)."""
+        self.stats_cache["valid"] = False
+        self.save_stats_cache()
     
     def _load_pdf_annotations(self):
         """Load PDF annotations (highlights, notes) from file."""
@@ -524,18 +595,21 @@ class GolfBackend:
             round_data["date"] = datetime.now().strftime("%Y-%m-%d %H:%M")
         self.rounds.append(round_data)
         save_json(ROUNDS_FILE, self.rounds)
+        self.invalidate_stats_cache()  # Stats need recomputation
 
     def delete_round(self, index):
         """Delete a round by its index."""
         if 0 <= index < len(self.rounds):
             del self.rounds[index]
             save_json(ROUNDS_FILE, self.rounds)
+            self.invalidate_stats_cache()
 
     def update_round(self, index, round_data):
         """Update a round at the given index."""
         if 0 <= index < len(self.rounds):
             self.rounds[index] = round_data
             save_json(ROUNDS_FILE, self.rounds)
+            self.invalidate_stats_cache()
 
     def get_filtered_rounds(self, round_type="all", sort_by="recent"):
         """
@@ -1024,6 +1098,239 @@ class GolfBackend:
             "handicap_eligible_9": handicap_counts["9_hole"],
             "total_holes_played": total_holes
         }
+
+    def get_advanced_statistics(self):
+        """
+        Calculate advanced statistics from detailed round data.
+        Returns GIR, putting stats, strokes-to-green by par type, club usage, etc.
+        """
+        # Check cache first
+        if self.stats_cache.get("valid") and self.stats_cache.get("advanced_stats"):
+            return self.stats_cache["advanced_stats"]
+        
+        stats = {
+            "gir": {"par3": [], "par4": [], "par5": [], "overall": []},
+            "putts": {"par3": [], "par4": [], "par5": [], "overall": []},
+            "strokes_to_green": {"par3": [], "par4": [], "par5": []},
+            "three_putt_count": 0,
+            "one_putt_count": 0,
+            "total_holes_with_putts": 0,
+            "club_usage": {},
+            "scramble_opportunities": 0,
+            "scramble_successes": 0,
+        }
+        
+        for rd in self.rounds:
+            if not rd.get("detailed_stats"):
+                continue
+            
+            course = self.get_course_by_name(rd["course_name"])
+            if not course:
+                continue
+            
+            pars = course["pars"]
+            detailed = rd["detailed_stats"]
+            
+            for hole_idx, hole_data in enumerate(detailed):
+                if hole_idx >= len(pars):
+                    continue
+                    
+                par = pars[hole_idx]
+                par_key = f"par{par}" if par in [3, 4, 5] else None
+                
+                strokes_to_green = hole_data.get("strokes_to_green")
+                putts = hole_data.get("putts")
+                clubs_used = hole_data.get("clubs_used", [])
+                score = hole_data.get("score")
+                
+                # GIR calculation
+                if strokes_to_green is not None:
+                    gir_target = par - 2  # Par 3: 1 stroke, Par 4: 2 strokes, Par 5: 3 strokes
+                    is_gir = strokes_to_green <= gir_target
+                    stats["gir"]["overall"].append(1 if is_gir else 0)
+                    if par_key:
+                        stats["gir"][par_key].append(1 if is_gir else 0)
+                        stats["strokes_to_green"][par_key].append(strokes_to_green)
+                    
+                    # Scramble tracking (missed GIR but made bogey or better)
+                    if not is_gir and score is not None:
+                        stats["scramble_opportunities"] += 1
+                        if score <= par + 1:  # Bogey or better
+                            stats["scramble_successes"] += 1
+                
+                # Putting stats
+                if putts is not None:
+                    stats["putts"]["overall"].append(putts)
+                    stats["total_holes_with_putts"] += 1
+                    if par_key:
+                        stats["putts"][par_key].append(putts)
+                    
+                    if putts >= 3:
+                        stats["three_putt_count"] += 1
+                    if putts == 1:
+                        stats["one_putt_count"] += 1
+                
+                # Club usage tracking (exclude putter from ranking)
+                for club in clubs_used:
+                    if club.lower() != "putter":
+                        stats["club_usage"][club] = stats["club_usage"].get(club, 0) + 1
+        
+        # Calculate averages and percentages
+        result = {
+            "gir_overall": self._calc_percentage(stats["gir"]["overall"]),
+            "gir_par3": self._calc_percentage(stats["gir"]["par3"]),
+            "gir_par4": self._calc_percentage(stats["gir"]["par4"]),
+            "gir_par5": self._calc_percentage(stats["gir"]["par5"]),
+            "avg_putts_overall": self._calc_average(stats["putts"]["overall"]),
+            "avg_putts_par3": self._calc_average(stats["putts"]["par3"]),
+            "avg_putts_par4": self._calc_average(stats["putts"]["par4"]),
+            "avg_putts_par5": self._calc_average(stats["putts"]["par5"]),
+            "avg_strokes_to_green_par3": self._calc_average(stats["strokes_to_green"]["par3"]),
+            "avg_strokes_to_green_par4": self._calc_average(stats["strokes_to_green"]["par4"]),
+            "avg_strokes_to_green_par5": self._calc_average(stats["strokes_to_green"]["par5"]),
+            "three_putt_rate": round(stats["three_putt_count"] / stats["total_holes_with_putts"] * 100, 1) if stats["total_holes_with_putts"] > 0 else None,
+            "one_putt_rate": round(stats["one_putt_count"] / stats["total_holes_with_putts"] * 100, 1) if stats["total_holes_with_putts"] > 0 else None,
+            "scramble_rate": round(stats["scramble_successes"] / stats["scramble_opportunities"] * 100, 1) if stats["scramble_opportunities"] > 0 else None,
+            "club_usage": stats["club_usage"],
+            "total_holes_tracked": stats["total_holes_with_putts"],
+            "scramble_opportunities": stats["scramble_opportunities"],
+            "scramble_successes": stats["scramble_successes"],
+        }
+        
+        # Cache the result
+        self.stats_cache["advanced_stats"] = result
+        self.stats_cache["valid"] = True
+        self.save_stats_cache()
+        
+        return result
+    
+    def _calc_percentage(self, values):
+        """Calculate percentage from a list of 0s and 1s."""
+        if not values:
+            return None
+        return round(sum(values) / len(values) * 100, 1)
+    
+    def _calc_average(self, values):
+        """Calculate average from a list of numbers."""
+        if not values:
+            return None
+        return round(mean(values), 2)
+    
+    def get_club_analytics(self):
+        """
+        Analyze club usage patterns.
+        Returns clubs ranked by usage, rarely used clubs, and category breakdown.
+        """
+        adv_stats = self.get_advanced_statistics()
+        club_usage = adv_stats.get("club_usage", {})
+        
+        if not club_usage:
+            return {
+                "ranked_clubs": [],
+                "rarely_used": [],
+                "never_used": [],
+                "category_breakdown": {},
+                "total_shots": 0
+            }
+        
+        total_shots = sum(club_usage.values())
+        
+        # Rank clubs by usage (most to least)
+        ranked = sorted(club_usage.items(), key=lambda x: x[1], reverse=True)
+        ranked_clubs = [
+            {"name": name, "count": count, "percentage": round(count / total_shots * 100, 1)}
+            for name, count in ranked
+        ]
+        
+        # Find rarely used clubs (< 3% of shots)
+        rarely_used = [c for c in ranked_clubs if c["percentage"] < 3]
+        
+        # Find clubs in bag that were never used
+        bag_clubs = [c["name"] for c in self.clubs if c["name"].lower() != "putter"]
+        used_clubs = set(club_usage.keys())
+        never_used = [c for c in bag_clubs if c not in used_clubs]
+        
+        # Category breakdown
+        category_breakdown = {}
+        for club_name, count in club_usage.items():
+            cat_info = CLUB_CATEGORIES.get(club_name, {"category": "other"})
+            cat = cat_info["category"]
+            category_breakdown[cat] = category_breakdown.get(cat, 0) + count
+        
+        return {
+            "ranked_clubs": ranked_clubs,
+            "rarely_used": rarely_used,
+            "never_used": never_used,
+            "category_breakdown": category_breakdown,
+            "total_shots": total_shots
+        }
+    
+    def get_stroke_leak_analysis(self):
+        """
+        Analyze where the player is losing the most strokes.
+        Returns insights about tee-to-green vs putting performance.
+        """
+        adv_stats = self.get_advanced_statistics()
+        
+        insights = []
+        
+        # Check strokes to green vs par expectations
+        avg_stg_par4 = adv_stats.get("avg_strokes_to_green_par4")
+        if avg_stg_par4 is not None:
+            excess = avg_stg_par4 - 2  # Expectation is 2 for par 4
+            if excess > 1:
+                insights.append({
+                    "area": "approach",
+                    "severity": "high" if excess > 2 else "medium",
+                    "message": f"On Par 4s, you're averaging {avg_stg_par4:.1f} strokes to reach the green (target: 2)",
+                    "stat": avg_stg_par4
+                })
+        
+        avg_stg_par3 = adv_stats.get("avg_strokes_to_green_par3")
+        if avg_stg_par3 is not None:
+            excess = avg_stg_par3 - 1
+            if excess > 0.5:
+                insights.append({
+                    "area": "tee_shots_par3",
+                    "severity": "high" if excess > 1 else "medium",
+                    "message": f"On Par 3s, you're averaging {avg_stg_par3:.1f} strokes to reach the green (target: 1)",
+                    "stat": avg_stg_par3
+                })
+        
+        # Check putting
+        three_putt_rate = adv_stats.get("three_putt_rate")
+        if three_putt_rate is not None and three_putt_rate > 10:
+            insights.append({
+                "area": "putting",
+                "severity": "high" if three_putt_rate > 20 else "medium",
+                "message": f"3-putt rate is {three_putt_rate:.1f}% ({adv_stats.get('total_holes_tracked', 0)} holes tracked)",
+                "stat": three_putt_rate
+            })
+        
+        avg_putts = adv_stats.get("avg_putts_overall")
+        if avg_putts is not None and avg_putts > 2.1:
+            insights.append({
+                "area": "putting_avg",
+                "severity": "medium",
+                "message": f"Averaging {avg_putts:.2f} putts per hole (tour avg: ~1.8)",
+                "stat": avg_putts
+            })
+        
+        # GIR insights
+        gir_overall = adv_stats.get("gir_overall")
+        if gir_overall is not None and gir_overall < 30:
+            insights.append({
+                "area": "gir",
+                "severity": "high" if gir_overall < 20 else "medium",
+                "message": f"GIR is {gir_overall:.1f}% (amateur target: 30-40%)",
+                "stat": gir_overall
+            })
+        
+        # Sort by severity
+        severity_order = {"high": 0, "medium": 1, "low": 2}
+        insights.sort(key=lambda x: severity_order.get(x["severity"], 2))
+        
+        return insights
 
 
 # ---- Scorecard Export Helper Functions ----
