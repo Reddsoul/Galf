@@ -3,13 +3,9 @@ import os
 import re
 from statistics import mean
 from datetime import datetime
+import fitz 
 
-# PDF library for direct rulebook access
-try:
-    import fitz  # PyMuPDF
-    PDF_AVAILABLE = True
-except ImportError:
-    PDF_AVAILABLE = False
+PDF_AVAILABLE = True
 
 # --- Data files ---
 COURSES_FILE = 'data/courses.json'

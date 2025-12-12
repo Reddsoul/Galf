@@ -1,11 +1,15 @@
 from datetime import datetime, date
 
-from Backend import GolfBackend, save_json, ROUNDS_FILE, generate_scorecard_data, PDF_AVAILABLE, CLUB_CATEGORIES
+from Backend import GolfBackend, save_json, ROUNDS_FILE, generate_scorecard_data
+
+from yardbook_integration import yardbookIntegration
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 from tkcalendar import DateEntry
+
+import fitz 
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter, landscape
@@ -14,22 +18,23 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
-try:
-    import fitz  # PyMuPDF
-    PYMUPDF_AVAILABLE = True
-except ImportError:
-    PYMUPDF_AVAILABLE = False
-
+PYMUPDF_AVAILABLE = True
 REPORTLAB_AVAILABLE = True
 PIL_AVAILABLE = True
 
+# Courses file path (must match Backend.py)
+COURSES_FILE = 'data/courses.json'
 
 class GolfApp:
     def __init__(self, root):
         self.backend = GolfBackend()
         self.root = root
         root.title("Golf Handicap Tracker")
-        root.geometry("400x550")
+        root.geometry("400x580")  # Slightly taller to fit new button
+
+        # === yardbook INITIALIZATION ===
+        self.yardbook = yardbookIntegration(self.backend, COURSES_FILE)
+
 
         style = ttk.Style()
         style.configure("Title.TLabel", font=("Helvetica", 16, "bold"))
@@ -66,6 +71,7 @@ class GolfApp:
             ("🏌️ Manage Courses", self.open_manage_courses),
             ("➕ Add New Course", lambda: self.open_course_window()),
             ("🏌️ Club Distances", self.open_club_distances),
+            ("📍 Yardbook", self.open_yardbook),  # NEW: yardbook button
             ("📖 Rulebook", self.open_rulebook),
             ("📊 Statistics", self.open_statistics),
         ]
@@ -109,11 +115,12 @@ class GolfApp:
     def open_manage_courses(self):
         win = tk.Toplevel(self.root)
         win.title("Manage Courses")
-        win.geometry("550x400")
+        win.geometry("650x450")  # Wider to fit yardbook column
 
         ttk.Label(win, text="Courses by Club", style="Header.TLabel").pack(pady=10)
 
-        cols = ("Club", "Course Name", "Holes", "Par")
+        # === yardbook: Added yardbook column ===
+        cols = ("Club", "Course Name", "Holes", "Par", "yardbook")
         tree = ttk.Treeview(win, columns=cols, show="headings", height=12)
         for col in cols:
             tree.heading(col, text=col)
@@ -121,10 +128,17 @@ class GolfApp:
         tree.column("Course Name", width=200)
         tree.column("Holes", width=60, anchor='center')
         tree.column("Par", width=60, anchor='center')
+        tree.column("yardbook", width=90, anchor='center')
         tree.pack(fill='both', expand=True, padx=10, pady=5)
 
         for c in sorted(self.backend.get_courses(), key=lambda x: (x.get("club", ""), x["name"])):
-            tree.insert("", "end", values=(c.get("club", ""), c["name"], len(c["pars"]), sum(c["pars"])))
+            # Check yardbook completion status
+            gb_status = "—"
+            if self.yardbook and self.yardbook.is_available():
+                summary = self.yardbook.manager.get_course_yardbook_summary(c["name"])
+                if summary["holes_with_data"] > 0:
+                    gb_status = f"✓ {summary['holes_complete']}/{summary['total_holes']}"
+            tree.insert("", "end", values=(c.get("club", ""), c["name"], len(c["pars"]), sum(c["pars"]), gb_status))
 
         btn_frame = ttk.Frame(win)
         btn_frame.pack(pady=10)
@@ -147,9 +161,43 @@ class GolfApp:
                 self.backend.delete_course(vals[1])
                 tree.delete(sel)
 
+        # === yardbook: Open yardbook for selected course ===
+        def open_course_yardbook():
+            sel = tree.focus()
+            if not sel:
+                return messagebox.showwarning("Warning", "Select a course first")
+            vals = tree.item(sel)["values"]
+            course_name = vals[1]
+            if self.yardbook and self.yardbook.is_available():
+                course = self.backend.get_course_by_name(course_name)
+                if course:
+                    self.yardbook._launch_yardbook(self.root, course, 1)
+            else:
+                messagebox.showinfo("Unavailable", "yardbook feature requires tkintermapview.\nInstall with: pip install tkintermapview")
+
         ttk.Button(btn_frame, text="Edit", command=edit_selected).pack(side='left', padx=5)
         ttk.Button(btn_frame, text="Delete", command=delete_selected).pack(side='left', padx=5)
+        ttk.Button(btn_frame, text="📍 yardbook", command=open_course_yardbook).pack(side='left', padx=5)
         ttk.Button(btn_frame, text="Close", command=win.destroy).pack(side='left', padx=5)
+
+    # === yardbook: Main yardbook launcher ===
+    def open_yardbook(self):
+        """Open the yardbook feature for mapping course holes."""
+        if self.yardbook and self.yardbook.is_available():
+            self.yardbook.show_course_selector(self.root)
+        else:
+            messagebox.showinfo(
+                "yardbook Unavailable",
+                "The yardbook feature requires the tkintermapview library.\n\n"
+                "To enable this feature, run:\n"
+                "  pip install tkintermapview\n\n"
+                "Then restart the application.\n\n"
+                "yardbook allows you to:\n"
+                "• View satellite maps of course holes\n"
+                "• Place tee, green, and target markers\n"
+                "• Calculate accurate yardages\n"
+                "• Draw fairway and hazard overlays"
+            )
 
     def open_course_window(self, course=None):
         self.editing_course = course
@@ -385,7 +433,7 @@ class GolfApp:
         ttk.Label(frame, text="Log New Round", style="Title.TLabel").grid(row=0, column=0, columnspan=2, pady=(0, 15))
 
         # Club (facility) selection - FIRST
-        ttk.Label(frame, text="Club/Facility:").grid(row=1, column=0, sticky='e', pady=5)
+        ttk.Label(frame, text="Club:").grid(row=1, column=0, sticky='e', pady=5)
         clubs = sorted(list(set(c.get("club", "") for c in courses if c.get("club"))))
         if "" in clubs:
             clubs.remove("")
@@ -472,7 +520,7 @@ class GolfApp:
         self.on_club_facility_selected()
     
     def on_club_facility_selected(self, event=None):
-        """Filter courses based on selected club/facility."""
+        """Filter courses based on selected club"""
         selected_club = self.club_facility_var.get()
         courses = self.backend.get_courses()
         
