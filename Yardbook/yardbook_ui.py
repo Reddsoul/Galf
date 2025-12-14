@@ -7,15 +7,27 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import Optional, Dict, List, Tuple, Callable
 
-import tkintermapview
+# Runtime capability detection for tkintermapview
+def _check_map_available():
+    """Check if tkintermapview is available at runtime."""
+    try:
+        import tkintermapview
+        return True, tkintermapview
+    except ImportError:
+        return False, None
 
-from yardbook_geo import (
+_map_available, tkintermapview = _check_map_available()
+
+from Yardbook.yardbook_geo import (
     generate_distance_ring,
     midpoint,
     calculate_hole_distances,
     validate_yardage_difference,
+    haversine_distance,
+    bearing,
+    destination_point,
 )
-from yardbook_data import (
+from Yardbook.yardbook_data import (
     yardbookManager,
     GeoPoint,
     Target,
@@ -26,7 +38,10 @@ from yardbook_data import (
     MARKER_STYLES
 )
 
-MAP_AVAILABLE = True
+
+def is_map_available():
+    """Public function to check map availability."""
+    return _map_available
 
 
 class yardbookView:
@@ -43,6 +58,8 @@ class yardbookView:
     MODE_HAZARD = "hazard"
     MODE_POLYGON = "polygon"
     MODE_PAN = "pan"
+    MODE_DELETE = "delete"  # New: delete mode
+    MODE_MOVE = "move"      # New: move mode
     
     def __init__(
         self, 
@@ -50,7 +67,9 @@ class yardbookView:
         course_data: Dict,
         hole_num: int,
         courses_file: str,
-        on_save_callback: Optional[Callable] = None
+        on_save_callback: Optional[Callable] = None,
+        selected_tee: Optional[str] = None,
+        club_distances: Optional[Dict] = None
     ):
         """
         Initialize the yardbook view.
@@ -61,6 +80,8 @@ class yardbookView:
             hole_num: Which hole to display (1-18)
             courses_file: Path to courses.json
             on_save_callback: Optional callback when data is saved
+            selected_tee: Selected tee box color (for multiple tee support)
+            club_distances: User's club distances from their bag
         """
         self.parent = parent
         self.course_data = course_data
@@ -68,6 +89,8 @@ class yardbookView:
         self.hole_num = hole_num
         self.courses_file = courses_file
         self.on_save_callback = on_save_callback
+        self.selected_tee = selected_tee or self._get_default_tee()
+        self.club_distances = club_distances or {}
         
         # Data management
         self.yardbook_mgr = yardbookManager(courses_file)
@@ -80,18 +103,25 @@ class yardbookView:
         self.temp_polygon_vertices: List[Tuple[float, float]] = []
         self.unsaved_changes = False
         
+        # Drag state for moving markers
+        self.dragging_marker = None
+        self.drag_marker_type = None
+        self.drag_marker_index = None
+        
         # Map objects tracking (for cleanup)
         self.map_markers: Dict[str, any] = {}
         self.map_paths: List[any] = []
         self.map_polygons: Dict[str, any] = {}
         self.distance_rings: List[any] = []
         self.aim_lines: List[any] = []
+        self.distance_labels: Dict[str, any] = {}  # For on-map distance labels
         
         # Toggle states
         self.show_distance_rings = tk.BooleanVar(value=False)
         self.show_aim_lines = tk.BooleanVar(value=True)
         self.show_polygons = tk.BooleanVar(value=True)
         self.show_distances = tk.BooleanVar(value=True)
+        self.show_on_map_distances = tk.BooleanVar(value=True)  # New: show distances on map
         
         # Get hole info
         self.hole_par = self._get_hole_par()
@@ -107,8 +137,20 @@ class yardbookView:
         self._render_all_features()
         self._update_distances_panel()
         
-        # Center map on course or existing data
-        self._initial_map_position()
+        # Center map on hole properly
+        self._center_on_hole()
+    
+    def _get_default_tee(self) -> str:
+        """Get the default tee box color."""
+        tee_boxes = self.course_data.get("tee_boxes", [])
+        if tee_boxes:
+            return tee_boxes[0].get("color", "White")
+        return "White"
+    
+    def _get_available_tees(self) -> List[str]:
+        """Get list of available tee box colors."""
+        tee_boxes = self.course_data.get("tee_boxes", [])
+        return [tb.get("color", "") for tb in tee_boxes if tb.get("color")]
     
     def _get_hole_par(self) -> int:
         """Get par for the current hole."""
@@ -124,6 +166,61 @@ class yardbookView:
             if self.hole_num <= len(yards):
                 return yards[self.hole_num - 1]
         return None
+    
+    def _get_user_club_ring_presets(self) -> Dict:
+        """
+        Generate distance ring presets from user's club distances.
+        Falls back to defaults if no user clubs are configured.
+        """
+        if not self.club_distances:
+            return DISTANCE_RING_PRESETS
+        
+        # Define colors for different club categories
+        category_colors = {
+            "driver": "#FF6B6B",
+            "wood": "#4ECDC4", 
+            "hybrid": "#45B7D1",
+            "iron": "#96CEB4",
+            "wedge": "#FFEAA7",
+            "putter": "#DDA0DD",
+            "other": "#98D8C8"
+        }
+        
+        # Build presets from user's clubs
+        user_presets = {}
+        for club in self.club_distances:
+            club_name = club.get("name", "")
+            distance = club.get("distance", 0)
+            
+            if distance <= 0 or club_name.lower() == "putter":
+                continue
+            
+            # Determine category for color
+            name_lower = club_name.lower()
+            if "driver" in name_lower:
+                color = category_colors["driver"]
+            elif "wood" in name_lower:
+                color = category_colors["wood"]
+            elif "hybrid" in name_lower:
+                color = category_colors["hybrid"]
+            elif "iron" in name_lower or name_lower in ["2i", "3i", "4i", "5i", "6i", "7i", "8i", "9i"]:
+                color = category_colors["iron"]
+            elif any(w in name_lower for w in ["wedge", "pw", "gw", "sw", "lw", "aw"]):
+                color = category_colors["wedge"]
+            else:
+                color = category_colors["other"]
+            
+            # Create a key-safe version of the name
+            key = club_name.lower().replace(" ", "_").replace("-", "_")
+            
+            user_presets[key] = {
+                "distance": distance,
+                "color": color,
+                "label": club_name
+            }
+        
+        # If no valid user clubs, fall back to defaults
+        return user_presets if user_presets else DISTANCE_RING_PRESETS
     
     def _create_window(self):
         """Create the main yardbook window."""
@@ -175,6 +272,8 @@ class yardbookView:
             ("Target", self.MODE_TARGET, "◎"),
             ("Hazard", self.MODE_HAZARD, "⚠"),
             ("Polygon", self.MODE_POLYGON, "▢"),
+            ("Move", self.MODE_MOVE, "✥"),      # New: move mode
+            ("Delete", self.MODE_DELETE, "🗑"),  # New: delete mode
         ]
         
         for label, mode, icon in modes:
@@ -188,6 +287,7 @@ class yardbookView:
             btn.pack(side='left', padx=3)
         
         # Right side - action buttons
+        ttk.Button(toolbar, text="📊 Greenbook View", command=self._show_greenbook_view).pack(side='right', padx=5)
         ttk.Button(toolbar, text="💾 Save", command=self._save_features).pack(side='right', padx=5)
         ttk.Button(toolbar, text="🗑 Clear All", command=self._clear_all).pack(side='right', padx=5)
     
@@ -196,7 +296,7 @@ class yardbookView:
         map_frame = ttk.Frame(self.main_frame)
         map_frame.grid(row=1, column=0, sticky='nsew', padx=5, pady=5)
         
-        if not MAP_AVAILABLE:
+        if not _map_available:
             ttk.Label(
                 map_frame, 
                 text="Map feature unavailable.\nPlease install tkintermapview:\npip install tkintermapview",
@@ -215,10 +315,9 @@ class yardbookView:
         self.map_widget.pack(fill='both', expand=True)
         
         # Set to satellite view (using Google satellite tiles)
-        # Note: For production, consider using MapBox or other tile providers
         self.map_widget.set_tile_server(
             "https://mt0.google.com/vt/lyrs=s&hl=en&x={x}&y={y}&z={z}&s=Ga",
-            max_zoom=20
+            max_zoom=22  # Increased max zoom for closer views
         )
         
         # Bind click events
@@ -231,6 +330,11 @@ class yardbookView:
         self.map_widget.add_right_click_menu_command(
             "Place Target Here",
             lambda coords: self._quick_place("target", coords),
+            pass_coords=True
+        )
+        self.map_widget.add_right_click_menu_command(
+            "Delete Marker Here",
+            lambda coords: self._delete_nearest_marker(coords),
             pass_coords=True
         )
     
@@ -341,21 +445,12 @@ class yardbookView:
         
         self.hazard_frame.pack_forget()  # Hidden by default
         
-        # Distance Rings Config
-        self.rings_frame = ttk.LabelFrame(sidebar, text="Distance Rings", padding=10)
+        # Distance Rings Config - Now uses player's clubs
+        self.rings_frame = ttk.LabelFrame(sidebar, text="Distance Rings (Your Clubs)", padding=10)
         self.rings_frame.pack(fill='x', pady=(0, 10))
         
-        self.ring_vars = {}
-        for preset_key, preset in DISTANCE_RING_PRESETS.items():
-            var = tk.BooleanVar(value=False)
-            self.ring_vars[preset_key] = var
-            cb = ttk.Checkbutton(
-                self.rings_frame,
-                text=f"{preset['label']} ({preset['distance']}y)",
-                variable=var,
-                command=self._update_distance_rings
-            )
-            cb.pack(anchor='w')
+        # Create scrollable frame for club rings if many clubs
+        self._create_club_rings_ui()
         
         # Status bar
         self.status_label = ttk.Label(
@@ -365,6 +460,73 @@ class yardbookView:
             foreground="gray"
         )
         self.status_label.pack(side='bottom', pady=10)
+    
+    def _create_club_rings_ui(self):
+        """Create the UI for club distance rings using player's clubs."""
+        # Clear existing widgets in rings_frame
+        for widget in self.rings_frame.winfo_children():
+            widget.destroy()
+        
+        # Get the ring presets (user's clubs or defaults)
+        ring_presets = self._get_user_club_ring_presets()
+        
+        # Sort by distance descending
+        sorted_presets = sorted(
+            ring_presets.items(), 
+            key=lambda x: x[1].get("distance", 0), 
+            reverse=True
+        )
+        
+        self.ring_vars = {}
+        
+        # Create a canvas with scrollbar for many clubs
+        if len(sorted_presets) > 8:
+            canvas = tk.Canvas(self.rings_frame, height=150)
+            scrollbar = ttk.Scrollbar(self.rings_frame, orient="vertical", command=canvas.yview)
+            scroll_frame = ttk.Frame(canvas)
+            
+            scroll_frame.bind(
+                "<Configure>",
+                lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+            )
+            
+            canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set)
+            
+            canvas.pack(side='left', fill='both', expand=True)
+            scrollbar.pack(side='right', fill='y')
+            
+            parent_frame = scroll_frame
+        else:
+            parent_frame = self.rings_frame
+        
+        for preset_key, preset in sorted_presets:
+            var = tk.BooleanVar(value=False)
+            self.ring_vars[preset_key] = var
+            
+            # Create frame for each club with color indicator
+            club_frame = ttk.Frame(parent_frame)
+            club_frame.pack(anchor='w', fill='x', pady=1)
+            
+            cb = ttk.Checkbutton(
+                club_frame,
+                text=f"{preset['label']} ({preset['distance']}y)",
+                variable=var,
+                command=self._update_distance_rings
+            )
+            cb.pack(side='left')
+            
+            # Color indicator
+            try:
+                color_label = tk.Label(
+                    club_frame, 
+                    text="●", 
+                    foreground=preset.get("color", "#AAAAAA"),
+                    font=("Helvetica", 10)
+                )
+                color_label.pack(side='left', padx=2)
+            except:
+                pass  # Skip color indicator if there's an issue
     
     def _set_mode(self, mode: str):
         """Set the current placement mode."""
@@ -379,6 +541,14 @@ class yardbookView:
             self.hazard_frame.pack(fill='x', pady=(0, 10))
             self.polygon_frame.pack_forget()
             self._set_status("Click on map to place hazard marker.")
+        elif mode == self.MODE_DELETE:
+            self.polygon_frame.pack_forget()
+            self.hazard_frame.pack_forget()
+            self._set_status("Click on a marker to delete it.")
+        elif mode == self.MODE_MOVE:
+            self.polygon_frame.pack_forget()
+            self.hazard_frame.pack_forget()
+            self._set_status("Click and drag markers to move them.")
         else:
             self.polygon_frame.pack_forget()
             self.hazard_frame.pack_forget()
@@ -404,6 +574,13 @@ class yardbookView:
         
         if self.current_mode == self.MODE_PAN:
             return  # Let map handle panning
+        
+        elif self.current_mode == self.MODE_DELETE:
+            self._handle_delete_click(lat, lon)
+        
+        elif self.current_mode == self.MODE_MOVE:
+            # Move mode click is handled by marker drag
+            self._handle_move_click(lat, lon)
         
         elif self.current_mode == self.MODE_TEE:
             self.features.tee = GeoPoint(lat=lat, lon=lon)
@@ -438,6 +615,187 @@ class yardbookView:
         # Update aim lines if enabled
         if self.show_aim_lines.get():
             self._render_aim_lines()
+        
+        # Update on-map distances
+        if self.show_on_map_distances.get():
+            self._render_on_map_distances()
+    
+    def _handle_delete_click(self, lat: float, lon: float):
+        """Handle click in delete mode - find and delete nearest marker."""
+        self._delete_nearest_marker((lat, lon))
+    
+    def _handle_move_click(self, lat: float, lon: float):
+        """Handle click in move mode - start dragging nearest marker."""
+        marker_info = self._find_nearest_marker(lat, lon)
+        if marker_info:
+            marker_type, index = marker_info
+            self._set_status(f"Click new location for {marker_type}")
+            # Store the marker being moved for the next click
+            self.dragging_marker = (marker_type, index, lat, lon)
+        else:
+            # If we have a marker being moved, place it at the new location
+            if self.dragging_marker:
+                marker_type, index, _, _ = self.dragging_marker
+                self._move_marker_to(marker_type, index, lat, lon)
+                self.dragging_marker = None
+    
+    def _find_nearest_marker(self, lat: float, lon: float, threshold: float = 50.0) -> Optional[Tuple[str, int]]:
+        """Find the nearest marker within threshold yards."""
+        nearest = None
+        nearest_dist = threshold
+        
+        # Check tee
+        if self.features.tee.is_set():
+            dist = haversine_distance(lat, lon, self.features.tee.lat, self.features.tee.lon)
+            if dist < nearest_dist:
+                nearest_dist = dist
+                nearest = ("tee", 0)
+        
+        # Check green front
+        if self.features.green_front.is_set():
+            dist = haversine_distance(lat, lon, self.features.green_front.lat, self.features.green_front.lon)
+            if dist < nearest_dist:
+                nearest_dist = dist
+                nearest = ("green_front", 0)
+        
+        # Check green back
+        if self.features.green_back.is_set():
+            dist = haversine_distance(lat, lon, self.features.green_back.lat, self.features.green_back.lon)
+            if dist < nearest_dist:
+                nearest_dist = dist
+                nearest = ("green_back", 0)
+        
+        # Check targets
+        for i, target in enumerate(self.features.targets):
+            if target.lat is not None:
+                dist = haversine_distance(lat, lon, target.lat, target.lon)
+                if dist < nearest_dist:
+                    nearest_dist = dist
+                    nearest = ("target", i)
+        
+        # Check hazards
+        for i, hazard in enumerate(self.features.hazards):
+            if hazard.lat is not None:
+                dist = haversine_distance(lat, lon, hazard.lat, hazard.lon)
+                if dist < nearest_dist:
+                    nearest_dist = dist
+                    nearest = ("hazard", i)
+        
+        return nearest
+    
+    def _delete_nearest_marker(self, coords: Tuple[float, float]):
+        """Delete the nearest marker to the given coordinates."""
+        lat, lon = coords
+        marker_info = self._find_nearest_marker(lat, lon)
+        
+        if not marker_info:
+            self._set_status("No marker found nearby.")
+            return
+        
+        marker_type, index = marker_info
+        
+        # Delete based on type
+        if marker_type == "tee":
+            self.features.tee = GeoPoint()
+            if "tee" in self.map_markers:
+                try:
+                    self.map_markers["tee"].delete()
+                except:
+                    pass
+                del self.map_markers["tee"]
+            self._set_status("Tee marker deleted.")
+        
+        elif marker_type == "green_front":
+            self.features.green_front = GeoPoint()
+            if "green_front" in self.map_markers:
+                try:
+                    self.map_markers["green_front"].delete()
+                except:
+                    pass
+                del self.map_markers["green_front"]
+            self._set_status("Green front marker deleted.")
+        
+        elif marker_type == "green_back":
+            self.features.green_back = GeoPoint()
+            if "green_back" in self.map_markers:
+                try:
+                    self.map_markers["green_back"].delete()
+                except:
+                    pass
+                del self.map_markers["green_back"]
+            self._set_status("Green back marker deleted.")
+        
+        elif marker_type == "target":
+            if 0 <= index < len(self.features.targets):
+                target_name = self.features.targets[index].name
+                self.features.targets.pop(index)
+                key = f"target_{index}"
+                if key in self.map_markers:
+                    try:
+                        self.map_markers[key].delete()
+                    except:
+                        pass
+                    del self.map_markers[key]
+                # Re-render all targets to fix indices
+                self._render_all_features()
+                self._set_status(f"Target '{target_name}' deleted.")
+        
+        elif marker_type == "hazard":
+            if 0 <= index < len(self.features.hazards):
+                self.features.hazards.pop(index)
+                key = f"hazard_{index}"
+                if key in self.map_markers:
+                    try:
+                        self.map_markers[key].delete()
+                    except:
+                        pass
+                    del self.map_markers[key]
+                # Re-render all hazards to fix indices
+                self._render_all_features()
+                self._set_status("Hazard deleted.")
+        
+        self.unsaved_changes = True
+        self._update_distances_panel()
+        if self.show_aim_lines.get():
+            self._render_aim_lines()
+    
+    def _move_marker_to(self, marker_type: str, index: int, new_lat: float, new_lon: float):
+        """Move a marker to a new location."""
+        if marker_type == "tee":
+            self.features.tee = GeoPoint(lat=new_lat, lon=new_lon)
+            self._render_marker("tee", new_lat, new_lon)
+            self._set_status("Tee moved.")
+        
+        elif marker_type == "green_front":
+            self.features.green_front = GeoPoint(lat=new_lat, lon=new_lon)
+            self._render_marker("green_front", new_lat, new_lon)
+            self._set_status("Green front moved.")
+        
+        elif marker_type == "green_back":
+            self.features.green_back = GeoPoint(lat=new_lat, lon=new_lon)
+            self._render_marker("green_back", new_lat, new_lon)
+            self._set_status("Green back moved.")
+        
+        elif marker_type == "target":
+            if 0 <= index < len(self.features.targets):
+                self.features.targets[index].lat = new_lat
+                self.features.targets[index].lon = new_lon
+                self._render_target_marker(self.features.targets[index], index)
+                self._set_status(f"Target '{self.features.targets[index].name}' moved.")
+        
+        elif marker_type == "hazard":
+            if 0 <= index < len(self.features.hazards):
+                self.features.hazards[index].lat = new_lat
+                self.features.hazards[index].lon = new_lon
+                self._render_hazard_marker(self.features.hazards[index], index)
+                self._set_status("Hazard moved.")
+        
+        self.unsaved_changes = True
+        self._update_distances_panel()
+        if self.show_aim_lines.get():
+            self._render_aim_lines()
+        if self.show_on_map_distances.get():
+            self._render_on_map_distances()
     
     def _quick_place(self, marker_type: str, coords: Tuple[float, float]):
         """Quick placement from right-click menu."""
@@ -760,9 +1118,12 @@ class yardbookView:
         tee_lat = self.features.tee.lat
         tee_lon = self.features.tee.lon
         
+        # Get the current ring presets (user's clubs or defaults)
+        ring_presets = self._get_user_club_ring_presets()
+        
         for preset_key, var in self.ring_vars.items():
-            if var.get():
-                preset = DISTANCE_RING_PRESETS[preset_key]
+            if var.get() and preset_key in ring_presets:
+                preset = ring_presets[preset_key]
                 ring_points = generate_distance_ring(
                     tee_lat, tee_lon, 
                     preset["distance"],
@@ -880,8 +1241,6 @@ class yardbookView:
     
     def _switch_hole(self, new_hole: int):
         """Switch to a different hole."""
-        # Save current hole's view position (optional)
-        
         # Load new hole
         self.hole_num = new_hole
         self.hole_par = self._get_hole_par()
@@ -899,9 +1258,13 @@ class yardbookView:
         self._render_all_features()
         self._update_distances_panel()
         
+        # Center map on the new hole
+        self._center_on_hole()
+        
         # Reset state
         self.unsaved_changes = False
         self.temp_polygon_vertices = []
+        self.dragging_marker = None
         self._set_status("Ready.")
     
     def _clear_map_objects(self):
@@ -953,21 +1316,107 @@ class yardbookView:
                 pass
         self.aim_lines = []
     
-    def _initial_map_position(self):
-        """Set initial map position."""
+    def _center_on_hole(self):
+        """
+        Center the map on the hole, showing from tee to green.
+        
+        Improved zoom calculation for better close-up views.
+        Note: tkintermapview doesn't support rotation, but we optimize
+        the view to show the full hole layout.
+        """
         if not self.map_widget:
             return
         
-        # If we have tee data, center on that
-        if self.features.tee.is_set():
+        # If we have both tee and green data, center between them
+        if self.features.tee.is_set() and self.features.green_back.is_set():
+            # Calculate center point between tee and green back
+            tee_lat, tee_lon = self.features.tee.lat, self.features.tee.lon
+            gb_lat, gb_lon = self.features.green_back.lat, self.features.green_back.lon
+            
+            # Get the midpoint
+            center_lat, center_lon = midpoint(tee_lat, tee_lon, gb_lat, gb_lon)
+            
+            # Calculate the hole length to determine appropriate zoom
+            hole_length = haversine_distance(tee_lat, tee_lon, gb_lat, gb_lon)
+            
+            # Improved zoom calculation - closer views for golf holes
+            # Zoom levels: higher = closer
+            # Typical hole lengths:
+            # - Par 3: 100-220 yards
+            # - Par 4: 300-450 yards  
+            # - Par 5: 450-600 yards
+            if hole_length < 150:
+                zoom = 20  # Very short par 3
+            elif hole_length < 200:
+                zoom = 19  # Short par 3
+            elif hole_length < 280:
+                zoom = 19  # Long par 3 / very short par 4
+            elif hole_length < 350:
+                zoom = 18  # Short par 4
+            elif hole_length < 430:
+                zoom = 18  # Medium par 4
+            elif hole_length < 500:
+                zoom = 17  # Long par 4 / short par 5
+            elif hole_length < 550:
+                zoom = 17  # Medium par 5
+            else:
+                zoom = 16  # Long par 5
+            
+            self.map_widget.set_position(center_lat, center_lon)
+            self.map_widget.set_zoom(zoom)
+            
+        elif self.features.tee.is_set() and self.features.green_front.is_set():
+            # Fall back to tee and green front
+            tee_lat, tee_lon = self.features.tee.lat, self.features.tee.lon
+            gf_lat, gf_lon = self.features.green_front.lat, self.features.green_front.lon
+            
+            center_lat, center_lon = midpoint(tee_lat, tee_lon, gf_lat, gf_lon)
+            hole_length = haversine_distance(tee_lat, tee_lon, gf_lat, gf_lon)
+            
+            # Same improved zoom calculation
+            if hole_length < 150:
+                zoom = 20
+            elif hole_length < 200:
+                zoom = 19
+            elif hole_length < 280:
+                zoom = 19
+            elif hole_length < 350:
+                zoom = 18
+            elif hole_length < 430:
+                zoom = 18
+            elif hole_length < 500:
+                zoom = 17
+            elif hole_length < 550:
+                zoom = 17
+            else:
+                zoom = 16
+            
+            self.map_widget.set_position(center_lat, center_lon)
+            self.map_widget.set_zoom(zoom)
+            
+        elif self.features.tee.is_set():
+            # Just tee - zoom in close
             self.map_widget.set_position(self.features.tee.lat, self.features.tee.lon)
-            self.map_widget.set_zoom(18)
+            self.map_widget.set_zoom(19)  # Closer view
+            
+        elif self.features.green_front.is_set():
+            # Just green - zoom in close
+            self.map_widget.set_position(self.features.green_front.lat, self.features.green_front.lon)
+            self.map_widget.set_zoom(19)  # Closer view
         else:
-            # Try to get approximate location from course name (would need geocoding)
-            # For now, default to a reasonable position
-            # In production, you'd want to geocode the course address
-            self.map_widget.set_position(40.0, -74.0)  # Default to generic location
-            self.map_widget.set_zoom(15)
+            # No data - use course location if available, else default
+            # Try to get approximate course location from course data
+            course_lat = self.course_data.get("latitude")
+            course_lon = self.course_data.get("longitude")
+            
+            if course_lat and course_lon:
+                self.map_widget.set_position(course_lat, course_lon)
+                self.map_widget.set_zoom(17)
+            else:
+                # Default position (roughly center of US as fallback)
+                self.map_widget.set_position(39.8283, -98.5795)
+                self.map_widget.set_zoom(15)
+            
             self._set_status("Position the map and place the tee marker to begin.")
     
     # === Save/Load ===
@@ -1103,6 +1552,210 @@ class yardbookView:
             self._render_all_features()
             self._update_distances_panel()
             self.unsaved_changes = True
+    
+    def _render_on_map_distances(self):
+        """Render distance labels directly on the map (greenbook style)."""
+        if not self.map_widget:
+            return
+        
+        # This would require custom canvas drawing over the map
+        # For now, we'll use the aim lines with distance markers
+        # Full implementation would use tkinter canvas overlay
+        pass
+    
+    def _show_greenbook_view(self):
+        """Show a static greenbook-style view with distances drawn on the image."""
+        if not self.features.has_data():
+            messagebox.showinfo("No Data", "Place tee and green markers first to generate a greenbook view.")
+            return
+        
+        # Create a new window for the greenbook view
+        greenbook_win = tk.Toplevel(self.window)
+        greenbook_win.title(f"Greenbook - {self.course_name} - Hole {self.hole_num}")
+        greenbook_win.geometry("800x600")
+        
+        # Create canvas
+        canvas = tk.Canvas(greenbook_win, bg='#228B22', highlightthickness=0)
+        canvas.pack(fill='both', expand=True)
+        
+        # Calculate distances
+        map_features_dict = {
+            "tee": self.features.tee.to_dict(),
+            "green_front": self.features.green_front.to_dict(),
+            "green_back": self.features.green_back.to_dict(),
+            "targets": [t.to_dict() for t in self.features.targets],
+            "hazards": [h.to_dict() for h in self.features.hazards]
+        }
+        distances = calculate_hole_distances(map_features_dict)
+        
+        # Wait for window to be drawn to get dimensions
+        greenbook_win.update()
+        width = canvas.winfo_width()
+        height = canvas.winfo_height()
+        
+        # Draw the hole representation
+        self._draw_greenbook_hole(canvas, width, height, distances)
+        
+        # Add hole info
+        info_text = f"Hole {self.hole_num} • Par {self.hole_par}"
+        if distances['tee_to_green_center']:
+            info_text += f" • {distances['tee_to_green_center']:.0f} yards"
+        canvas.create_text(width/2, 30, text=info_text, fill='white', 
+                          font=("Helvetica", 18, "bold"))
+        
+        # Add navigation buttons
+        btn_frame = ttk.Frame(greenbook_win)
+        btn_frame.pack(side='bottom', pady=10)
+        
+        def prev_hole_gb():
+            greenbook_win.destroy()
+            if self._check_unsaved():
+                new_hole = self.hole_num - 1
+                if new_hole < 1:
+                    new_hole = len(self.course_data.get("pars", []))
+                self._switch_hole(new_hole)
+                self._show_greenbook_view()
+        
+        def next_hole_gb():
+            greenbook_win.destroy()
+            if self._check_unsaved():
+                new_hole = self.hole_num + 1
+                if new_hole > len(self.course_data.get("pars", [])):
+                    new_hole = 1
+                self._switch_hole(new_hole)
+                self._show_greenbook_view()
+        
+        ttk.Button(btn_frame, text="◀ Prev Hole", command=prev_hole_gb).pack(side='left', padx=10)
+        ttk.Button(btn_frame, text="Next Hole ▶", command=next_hole_gb).pack(side='left', padx=10)
+        ttk.Button(btn_frame, text="Close", command=greenbook_win.destroy).pack(side='left', padx=10)
+    
+    def _draw_greenbook_hole(self, canvas, width: int, height: int, distances: Dict):
+        """Draw a schematic representation of the hole on the canvas."""
+        margin = 60
+        usable_height = height - margin * 2 - 60  # Extra for buttons
+        usable_width = width - margin * 2
+        
+        # Calculate scale - hole runs from bottom (tee) to top (green)
+        hole_length = distances.get('tee_to_green_center', 400) or 400
+        scale = usable_height / hole_length
+        
+        # Tee position (bottom center)
+        tee_x = width / 2
+        tee_y = height - margin - 30
+        
+        # Green position (top center)
+        green_y = margin + 30
+        
+        # Draw fairway (simple rectangle for now)
+        fairway_width = 80
+        canvas.create_polygon(
+            tee_x - fairway_width/2, tee_y,
+            tee_x - fairway_width/2 - 20, green_y + 40,
+            tee_x + fairway_width/2 + 20, green_y + 40,
+            tee_x + fairway_width/2, tee_y,
+            fill='#90EE90', outline='#228B22', width=2
+        )
+        
+        # Draw green (oval)
+        green_width = 60
+        green_height = 40
+        canvas.create_oval(
+            tee_x - green_width/2, green_y - green_height/2,
+            tee_x + green_width/2, green_y + green_height/2,
+            fill='#006400', outline='#004000', width=2
+        )
+        
+        # Draw tee box
+        tee_width = 30
+        tee_height = 15
+        canvas.create_rectangle(
+            tee_x - tee_width/2, tee_y - tee_height/2,
+            tee_x + tee_width/2, tee_y + tee_height/2,
+            fill='#8B4513', outline='#654321', width=2
+        )
+        
+        # Draw distance labels
+        # Tee to Green Front
+        if distances.get('tee_to_green_front'):
+            front_y = green_y + green_height/2 + 5
+            canvas.create_text(tee_x + 80, front_y, 
+                             text=f"{distances['tee_to_green_front']:.0f}",
+                             fill='white', font=("Helvetica", 14, "bold"))
+            canvas.create_text(tee_x + 80, front_y + 15,
+                             text="FRONT", fill='#aaa', font=("Helvetica", 10))
+        
+        # Tee to Green Center  
+        if distances.get('tee_to_green_center'):
+            canvas.create_text(tee_x - 80, green_y,
+                             text=f"{distances['tee_to_green_center']:.0f}",
+                             fill='yellow', font=("Helvetica", 16, "bold"))
+            canvas.create_text(tee_x - 80, green_y + 18,
+                             text="CENTER", fill='#aaa', font=("Helvetica", 10))
+        
+        # Tee to Green Back
+        if distances.get('tee_to_green_back'):
+            back_y = green_y - green_height/2 - 5
+            canvas.create_text(tee_x + 80, back_y,
+                             text=f"{distances['tee_to_green_back']:.0f}",
+                             fill='white', font=("Helvetica", 14, "bold"))
+            canvas.create_text(tee_x + 80, back_y - 15,
+                             text="BACK", fill='#aaa', font=("Helvetica", 10))
+        
+        # Green Depth
+        if distances.get('green_depth'):
+            canvas.create_text(tee_x, green_y - green_height/2 - 25,
+                             text=f"Depth: {distances['green_depth']:.0f}y",
+                             fill='#ccc', font=("Helvetica", 11))
+        
+        # Draw targets
+        for i, target in enumerate(distances.get('targets', [])):
+            if target.get('from_tee'):
+                # Position target on the fairway
+                target_y = tee_y - (target['from_tee'] * scale)
+                
+                # Draw target marker
+                canvas.create_oval(
+                    tee_x - 8, target_y - 8,
+                    tee_x + 8, target_y + 8,
+                    fill='yellow', outline='orange', width=2
+                )
+                
+                # Draw distance to tee
+                canvas.create_text(tee_x + 50, target_y,
+                                 text=f"{target['from_tee']:.0f}y",
+                                 fill='yellow', font=("Helvetica", 12, "bold"))
+                
+                # Draw distance to green
+                if target.get('to_green'):
+                    canvas.create_text(tee_x - 50, target_y,
+                                     text=f"→{target['to_green']:.0f}y",
+                                     fill='#90EE90', font=("Helvetica", 11))
+        
+        # Draw hazards
+        for i, hazard in enumerate(distances.get('hazards', [])):
+            if hazard.get('from_tee'):
+                hazard_y = tee_y - (hazard['from_tee'] * scale)
+                
+                # Color based on type
+                hazard_type = hazard.get('type', 'water')
+                if hazard_type == 'water':
+                    color = '#1E90FF'
+                elif hazard_type == 'bunker':
+                    color = '#F4E4C1'
+                else:
+                    color = '#8B4513'
+                
+                # Draw hazard marker (offset to side)
+                offset = 60 if i % 2 == 0 else -60
+                canvas.create_oval(
+                    tee_x + offset - 10, hazard_y - 10,
+                    tee_x + offset + 10, hazard_y + 10,
+                    fill=color, outline='red', width=1
+                )
+                
+                canvas.create_text(tee_x + offset, hazard_y + 20,
+                                 text=f"{hazard['from_tee']:.0f}y",
+                                 fill='red', font=("Helvetica", 10))
 
 
 def open_yardbook(
@@ -1110,7 +1763,9 @@ def open_yardbook(
     course_data: Dict,
     hole_num: int,
     courses_file: str,
-    on_save_callback: Optional[Callable] = None
+    on_save_callback: Optional[Callable] = None,
+    selected_tee: Optional[str] = None,
+    club_distances: Optional[List[Dict]] = None
 ) -> yardbookView:
     """
     Convenience function to open the yardbook view.
@@ -1121,6 +1776,8 @@ def open_yardbook(
         hole_num: Hole number to display
         courses_file: Path to courses.json
         on_save_callback: Optional callback when data is saved
+        selected_tee: Selected tee box color
+        club_distances: User's club distances (list of {"name": str, "distance": int})
     
     Returns:
         yardbookView instance
@@ -1130,5 +1787,7 @@ def open_yardbook(
         course_data=course_data,
         hole_num=hole_num,
         courses_file=courses_file,
-        on_save_callback=on_save_callback
+        on_save_callback=on_save_callback,
+        selected_tee=selected_tee,
+        club_distances=club_distances
     )

@@ -3,22 +3,31 @@ import os
 import re
 from statistics import mean
 from datetime import datetime
-import fitz 
 
-PDF_AVAILABLE = True
+
+# Runtime capability detection for PyMuPDF
+def _check_pymupdf():
+    """Check if PyMuPDF (fitz) is available at runtime."""
+    try:
+        import fitz
+        return True, fitz
+    except ImportError:
+        return False, None
+
+_pymupdf_available, fitz = _check_pymupdf()
 
 # --- Data files ---
-COURSES_FILE = 'data/courses.json'
-ROUNDS_FILE = 'data/rounds.json'
-CLUBS_FILE = 'data/clubs.json'
-RULEBOOK_PDF = 'data/2023_Rules_of_Golf.pdf'  # Changed from JSON to PDF
-BOOKMARKS_FILE = 'data/bookmarks.json'
-RULE_NOTES_FILE = 'data/rule_notes.json'
-RULEBOOK_CACHE_FILE = 'data/rulebook_cache.json'  # Cache for parsed structure
-PDF_ANNOTATIONS_FILE = 'data/pdf_annotations.json'  # Highlights and notes on PDF pages
-PAGE_BOOKMARKS_FILE = 'data/page_bookmarks.json'  # Bookmarked page numbers
-STATS_CACHE_FILE = 'data/stats_cache.json'  # Cached computed statistics
-USER_PREFS_FILE = 'data/user_prefs.json'  # User preferences (entry mode, etc.)
+COURSES_FILE = 'Data/courses.json'
+ROUNDS_FILE = 'Data/rounds.json'
+CLUBS_FILE = 'Data/clubs.json'
+RULEBOOK_PDF = 'Data/2023_Rules_of_Golf.pdf'  # Changed from JSON to PDF
+BOOKMARKS_FILE = 'Data/bookmarks.json'
+RULE_NOTES_FILE = 'Data/rule_notes.json'
+RULEBOOK_CACHE_FILE = 'Data/rulebook_cache.json'  # Cache for parsed structure
+PDF_ANNOTATIONS_FILE = 'Data/pdf_annotations.json'  # Highlights and notes on PDF pages
+PAGE_BOOKMARKS_FILE = 'Data/page_bookmarks.json'  # Bookmarked page numbers
+STATS_CACHE_FILE = 'Data/stats_cache.json'  # Cached computed statistics
+USER_PREFS_FILE = 'Data/user_prefs.json'  # User preferences (entry mode, etc.)
 
 # Club categories for analytics
 CLUB_CATEGORIES = {
@@ -71,7 +80,7 @@ class PDFRulebook:
         self._cache = None
         self._page_text_cache = {}
         
-        if PDF_AVAILABLE and os.path.exists(pdf_path):
+        if _pymupdf_available and fitz and os.path.exists(pdf_path):
             self.doc = fitz.open(pdf_path)
         
     def is_available(self):
@@ -114,74 +123,172 @@ class PDFRulebook:
     
     def _parse_toc_from_pdf(self):
         """
-        Parse the Table of Contents directly from the PDF pages 5-9.
+        Parse the Table of Contents directly from the PDF.
+        Uses multiple strategies to ensure all chapters/rules are captured.
         Returns list of {'level': int, 'title': str, 'page': int} dicts.
         """
         if not self.is_available():
             return []
         
-        # Extract text from TOC pages (pages 5-9, 0-indexed: 4-8)
+        entries = []
+        
+        # Strategy 1: Try to use PDF's built-in TOC (outline) first
+        try:
+            toc = self.doc.get_toc()
+            if toc and len(toc) > 5:  # Has reasonable TOC
+                for level, title, page in toc:
+                    normalized_level = min(max(level, 1), 3)
+                    entries.append({
+                        'level': normalized_level,
+                        'title': title.strip(),
+                        'page': page
+                    })
+                return entries
+        except:
+            pass
+        
+        # Strategy 2: Parse TOC from text content (pages 5-10, extended range)
         toc_text = ""
-        for page_num in range(4, 9):
+        for page_num in range(4, 11):
             if page_num < len(self.doc):
                 page = self.doc[page_num]
                 toc_text += page.get_text() + "\n"
         
-        entries = []
         lines = toc_text.split('\n')
         i = 0
+        
+        # Patterns for matching TOC entries
+        toc_patterns = [
+            # Pattern: backspace character separator (common in PDFs)
+            (r'^(.+?)\x08\s*(\d+)$', None),
+            # Pattern: dots leading to page number
+            (r'^(.+?)\s*\.{2,}\s*(\d+)$', None),
+            # Pattern: Rule with dash/en-dash and title
+            (r'^(Rule\s+\d+[a-z]?\s*[–\-:]\s*.+?)\s+(\d+)$', 2),
+            # Pattern: Roman numeral sections
+            (r'^([IVX]+\.\s+.+?)\s+(\d+)$', 1),
+        ]
         
         while i < len(lines):
             line = lines[i].strip()
             
-            # Skip empty lines, "Contents" header, and standalone page numbers
-            if not line or line == "Contents" or (line.isdigit() and len(line) <= 2):
+            # Skip empty lines, headers, standalone page numbers
+            if not line or line == "Contents" or (line.isdigit() and len(line) <= 3):
                 i += 1
                 continue
             
-            # Check if line contains backspace character (\b) followed by page number
-            # This is how the PDF encodes TOC entries
-            if '\b' in line:
-                parts = line.split('\b')
-                title = parts[0].strip()
-                page_str = parts[-1].strip() if len(parts) > 1 else ""
-                
-                # Page number might be on next line
-                if not page_str.isdigit() and i + 1 < len(lines):
+            matched = False
+            for pattern, forced_level in toc_patterns:
+                match = re.match(pattern, line)
+                if match:
+                    title = match.group(1).strip()
+                    page_str = match.group(2).strip()
+                    
+                    if title and page_str.isdigit():
+                        page_num = int(page_str)
+                        
+                        # Determine hierarchy level
+                        level = forced_level if forced_level else self._determine_toc_level(title)
+                        
+                        # Clean up title
+                        title = re.sub(r'\s+', ' ', title).strip()
+                        
+                        entries.append({
+                            'level': level,
+                            'title': title,
+                            'page': page_num
+                        })
+                        matched = True
+                        break
+            
+            # Strategy 3: Handle split lines (title on one line, page on next)
+            if not matched and line and not line.isdigit():
+                if i + 1 < len(lines):
                     next_line = lines[i + 1].strip()
-                    if next_line.isdigit():
-                        page_str = next_line
-                        i += 1
-                
-                if title and page_str.isdigit():
-                    page_num = int(page_str)
-                    
-                    # Determine hierarchy level based on pattern
-                    level = 3  # Default: sub-rule (e.g., "1.1", "1.2")
-                    
-                    # Level 1: Parts (Roman numerals) and top-level items
-                    if re.match(r'^[IVX]+\.\s', title):
-                        level = 1
-                    elif title.startswith('Foreword') or title.startswith('Principal Changes') or \
-                         title.startswith('How to Use') or title == 'Index' or \
-                         title == 'Other Publications' or 'Definitions' in title:
-                        level = 1
-                    # Level 2: Rules
-                    elif re.match(r'^Rule\s+\d+', title):
-                        level = 2
-                    
-                    # Clean up title (normalize whitespace)
-                    title = re.sub(r'\s+', ' ', title).strip()
-                    
-                    entries.append({
-                        'level': level,
-                        'title': title,
-                        'page': page_num + 1  # Convert to 0-indexed for internal use
-                    })
+                    if next_line.isdigit() and int(next_line) < 500:
+                        title = line.strip()
+                        page_num = int(next_line)
+                        
+                        level = self._determine_toc_level(title)
+                        title = re.sub(r'\s+', ' ', title).strip()
+                        
+                        if len(title) > 2:
+                            entries.append({
+                                'level': level,
+                                'title': title,
+                                'page': page_num
+                            })
+                            i += 1
             
             i += 1
         
+        # Strategy 4: Ensure all rules 1-24 are present by scanning document
+        rules_found = set()
+        for entry in entries:
+            match = re.match(r'Rule\s+(\d+)', entry['title'])
+            if match:
+                rules_found.add(int(match.group(1)))
+        
+        # Check for missing rules (especially 5 and 6!)
+        for rule_num in range(1, 25):
+            if rule_num not in rules_found:
+                rule_entry = self._find_rule_in_document(rule_num)
+                if rule_entry:
+                    entries.append(rule_entry)
+        
+        # Sort entries by page number
+        entries.sort(key=lambda x: x['page'])
+        
         return entries
+    
+    def _determine_toc_level(self, title: str) -> int:
+        """Determine the hierarchy level of a TOC entry."""
+        # Level 1: Parts (Roman numerals), major sections
+        if re.match(r'^[IVX]+\.\s', title):
+            return 1
+        if any(title.startswith(x) for x in ['Foreword', 'Principal Changes', 'How to Use', 'Index', 'Other Publications']):
+            return 1
+        if 'Definitions' in title:
+            return 1
+        
+        # Level 2: Main Rules
+        if re.match(r'^Rule\s+\d+\s*[–\-:]?', title):
+            return 2
+        
+        # Level 3: Sub-rules
+        if re.match(r'^\d+\.\d+', title):
+            return 3
+        
+        return 2
+    
+    def _find_rule_in_document(self, rule_num: int):
+        """Search the document for a specific rule heading."""
+        if not self.is_available():
+            return None
+        
+        patterns = [
+            rf'Rule\s+{rule_num}\s*[–\-:]\s*([^\n]+)',
+            rf'RULE\s+{rule_num}\s*[–\-:]\s*([^\n]+)',
+        ]
+        
+        for page_num in range(len(self.doc)):
+            text = self.get_page_text(page_num)
+            for pattern in patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    rule_title = match.group(1).strip()
+                    # Clean up the title
+                    rule_title = re.sub(r'\s+', ' ', rule_title)
+                    if len(rule_title) > 50:
+                        rule_title = rule_title[:50] + "..."
+                    
+                    return {
+                        'level': 2,
+                        'title': f"Rule {rule_num} – {rule_title}",
+                        'page': page_num + 1
+                    }
+        
+        return None
     
     def _parse_structure(self):
         """Parse PDF to extract rule structure. Results are cached."""

@@ -1,6 +1,6 @@
 # **Golf Handicap Tracker ⛳**
 
-A clean, **privacy-first** desktop golf application for tracking rounds, managing courses, calculating a **fully WHS-compliant handicap index**, and using a **digital Greenbook / yardage book**.
+A clean, **privacy-first** desktop golf application for tracking rounds, managing courses, calculating a **fully WHS-compliant handicap index**, and using a **digital Yardbook / yardage book**.
 
 Built in Python.
 
@@ -60,9 +60,9 @@ Most golf apps are bloated, cloud-dependent, and opaque about how handicaps and 
 
 ---
 
-### **📍 Greenbook / Digital Yardage Book**
+### **📍 Yardbook / Digital Yardage Book**
 
-An **interactive, map-based Greenbook** inspired by tools like 18Birdies — built entirely for desktop and offline use.
+An **interactive, map-based Yardbook** inspired by tools like 18Birdies — built entirely for desktop and offline use.
 
 **Capabilities**
 
@@ -155,9 +155,9 @@ Once markers are placed:
 
 ---
 
-### **Use the Greenbook**
+### **Use the Yardbook**
 
-1. Click **📍 Greenbook** from the main menu
+1. Click **📍 Yardbook** from the main menu
 2. Select a course and hole
 3. Place markers and draw features on the map
 4. View live yardages and distance rings
@@ -167,7 +167,7 @@ Once markers are placed:
 
 ### **Use the Rulebook**
 
-1. **Open ****Rulebook**
+1. Open **Rulebook**
 2. Import your USGA / R&A Rules PDF
 3. Search rules by keyword
 4. Bookmark important rules
@@ -181,12 +181,15 @@ Once markers are placed:
 
 ```
 golf-handicap-tracker/
-├── Frontend.py                 # tkinter UI and workflows
-├── Backend.py                  # Data models, WHS logic, storage
-├── greenbook_ui.py             # Greenbook map interface
-├── greenbook_data.py           # Greenbook data models & persistence
-├── greenbook_geo.py            # Geodesic distance calculations
-├── greenbook_integration.py    # Frontend integration layer
+├── Frontend/
+    ├──Frontend.py      
+├── Backend/
+    ├──Backend.py    
+├── yardbook/  
+    ├── yardbook_data.py   
+    ├── yardbook_geo.py  
+    ├── yardbook_integration.py
+    └── yardbook_ui.py  
 ├── README.md
 └── data/
     ├── courses.json
@@ -205,7 +208,7 @@ golf-handicap-tracker/
 * Clean **Frontend / Backend separation**
 * All data stored as **human-readable JSON**
 * No external APIs required
-* Greenbook distances calculated using **Haversine geodesic math**
+* yardbook distances calculated using **Haversine geodesic math**
 * PDF generation via **ReportLab**
 * Rulebook ingestion pipeline:
   * Text extraction → normalization → indexing
@@ -218,7 +221,7 @@ golf-handicap-tracker/
 ### **Planned**
 
 * Green slope arrows
-* Greenbook PDF export
+* yardbook PDF export
 * Course strategy page
 * Shot-planning overlays
 
@@ -243,6 +246,6 @@ Pull requests are welcome, especially for:
 
 * UI/UX improvements
 * Advanced statistics
-* Greenbook enhancements
+* yardbook enhancements
 * Export and reporting features
 * Rulebook utilities

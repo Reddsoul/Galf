@@ -18,12 +18,12 @@ Usage in Frontend.py:
 
 import tkinter as tk
 from tkinter import ttk, messagebox
-from typing import Dict, Optional, Callable, Any
+from typing import Dict, Optional, Callable, Any, List
 
 # Import yardbook modules
-from yardbook_ui import yardbookView, open_yardbook, MAP_AVAILABLE
-from yardbook_data import yardbookManager
-from yardbook_geo import calculate_hole_distances
+from Yardbook.yardbook_ui import yardbookView, open_yardbook, is_map_available
+from Yardbook.yardbook_data import yardbookManager
+from Yardbook.yardbook_geo import calculate_hole_distances
 
 
 class yardbookIntegration:
@@ -50,7 +50,22 @@ class yardbookIntegration:
     
     def is_available(self) -> bool:
         """Check if yardbook feature is available."""
-        return MAP_AVAILABLE
+        return is_map_available()
+    
+    def _get_user_club_distances(self) -> List[Dict]:
+        """
+        Get the user's club distances from the backend.
+        
+        Returns:
+            List of club dictionaries with name and distance
+        """
+        try:
+            clubs = self.backend.get_clubs()
+            if clubs:
+                return clubs
+        except Exception as e:
+            print(f"Warning: Could not load user club distances: {e}")
+        return []
     
     def show_course_selector(self, parent: tk.Tk):
         """
@@ -85,12 +100,16 @@ class yardbookIntegration:
             except:
                 pass
         
+        # Get the user's club distances
+        club_distances = self._get_user_club_distances()
+        
         self.active_yardbook = open_yardbook(
             parent=parent,
             course_data=course_data,
             hole_num=hole_num,
             courses_file=self.courses_file,
-            on_save_callback=lambda: self._on_yardbook_save(course_data["name"])
+            on_save_callback=lambda: self._on_yardbook_save(course_data["name"]),
+            club_distances=club_distances
         )
     
     def _on_yardbook_save(self, course_name: str):
@@ -275,7 +294,7 @@ class CourseHoleSelector:
     def _populate_courses(self):
         """Populate the course dropdown."""
         courses = self.backend.get_courses()
-        course_names = [c["name"] for c in sorted(courses, key=lambda x: x.get("club", ""))]
+        course_names = [c["name"] for c in sorted(courses, key=lambda x: (x.get("club", ""), x["name"]))]
         
         self.course_combo['values'] = course_names
         

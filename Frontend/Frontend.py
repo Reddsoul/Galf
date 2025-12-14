@@ -1,15 +1,16 @@
 from datetime import datetime, date
 
-from Backend import GolfBackend, save_json, ROUNDS_FILE, generate_scorecard_data
+from Backend.Backend import GolfBackend, save_json, ROUNDS_FILE, generate_scorecard_data
 
-from yardbook_integration import yardbookIntegration
+from Yardbook.yardbook_integration import yardbookIntegration
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 from tkcalendar import DateEntry
 
-import fitz 
+
+import fitz
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter, landscape
@@ -18,12 +19,8 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
-PYMUPDF_AVAILABLE = True
-REPORTLAB_AVAILABLE = True
-PIL_AVAILABLE = True
-
 # Courses file path (must match Backend.py)
-COURSES_FILE = 'data/courses.json'
+COURSES_FILE = 'Data/courses.json'
 
 class GolfApp:
     def __init__(self, root):
@@ -1177,14 +1174,8 @@ class GolfApp:
         def do_export():
             fmt = export_format.get()
             if fmt == "pdf":
-                if not REPORTLAB_AVAILABLE:
-                    messagebox.showerror("Error", "PDF export requires reportlab.\nInstall with: pip install reportlab")
-                    return
                 self.export_scorecard_pdf(round_data)
             else:
-                if not PIL_AVAILABLE:
-                    messagebox.showerror("Error", "Image export requires Pillow.\nInstall with: pip install Pillow")
-                    return
                 self.export_scorecard_image(round_data)
             win.destroy()
 
@@ -1743,14 +1734,8 @@ class GolfApp:
             include = include_stats.get() if has_detailed_stats else False
             win.destroy()
             if fmt == "pdf":
-                if not REPORTLAB_AVAILABLE:
-                    messagebox.showerror("Error", "PDF export requires reportlab.\nInstall with: pip install reportlab")
-                    return
                 self.export_scorecard_pdf(round_data, include_detailed=include)
             else:
-                if not PIL_AVAILABLE:
-                    messagebox.showerror("Error", "Image export requires Pillow.\nInstall with: pip install pillow")
-                    return
                 self.export_scorecard_image(round_data, include_detailed=include)
 
         ttk.Button(frame, text="Export", command=do_export).pack(pady=15)
@@ -2038,9 +2023,6 @@ class GolfApp:
     
     def display_pdf_page_canvas(self, page_num):
         """Display a PDF page on the canvas with proper rendering."""
-        if not PYMUPDF_AVAILABLE:
-            self.status_var.set("PyMuPDF not installed")
-            return
         
         rulebook = self.backend.get_rulebook()
         if not rulebook.is_available():
