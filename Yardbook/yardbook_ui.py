@@ -18,6 +18,24 @@ def _check_map_available():
 
 _map_available, tkintermapview = _check_map_available()
 
+# Import OSM and SAM modules with graceful fallback
+try:
+    from osm_import import is_osm_available, import_osm_features, get_osm_feature_stats
+    _osm_module_available = True
+except ImportError:
+    _osm_module_available = False
+    def is_osm_available(): return False
+    def import_osm_features(*args, **kwargs): return {}, "OSM module not available"
+    def get_osm_feature_stats(f): return {}
+
+try:
+    from sam_autotrace import is_sam_available, get_sam_unavailable_message
+    _sam_module_available = True
+except ImportError:
+    _sam_module_available = False
+    def is_sam_available(): return False
+    def get_sam_unavailable_message(): return "SAM module not available"
+
 from Yardbook.yardbook_geo import (
     generate_distance_ring,
     midpoint,
@@ -58,8 +76,9 @@ class yardbookView:
     MODE_HAZARD = "hazard"
     MODE_POLYGON = "polygon"
     MODE_PAN = "pan"
-    MODE_DELETE = "delete"  # New: delete mode
-    MODE_MOVE = "move"      # New: move mode
+    MODE_DELETE = "delete"  # Delete mode
+    MODE_MOVE = "move"      # Move mode
+    MODE_SAM_TRACE = "sam_trace"  # SAM auto-trace mode
     
     def __init__(
         self, 
@@ -430,6 +449,29 @@ class yardbookView:
         
         self.polygon_frame.pack_forget()  # Hidden by default
         
+        # Auto-trace section (OSM and SAM)
+        auto_frame = ttk.LabelFrame(sidebar, text="Auto Features", padding=10)
+        auto_frame.pack(fill='x', pady=(0, 10))
+        
+        ttk.Button(
+            auto_frame,
+            text="🌍 Import from OSM",
+            command=self._import_osm_features
+        ).pack(fill='x', pady=2)
+        
+        ttk.Button(
+            auto_frame,
+            text="✨ Auto-Trace (SAM)",
+            command=self._start_sam_autotrace
+        ).pack(fill='x', pady=2)
+        
+        ttk.Label(
+            auto_frame,
+            text="Import course features from\nOpenStreetMap or auto-trace\nfrom satellite imagery",
+            font=("Helvetica", 8),
+            foreground="gray"
+        ).pack(pady=(5, 0))
+        
         # Hazard Type Selection
         self.hazard_frame = ttk.LabelFrame(sidebar, text="Hazard Type", padding=10)
         self.hazard_frame.pack(fill='x', pady=(0, 10))
@@ -581,6 +623,11 @@ class yardbookView:
         elif self.current_mode == self.MODE_MOVE:
             # Move mode click is handled by marker drag
             self._handle_move_click(lat, lon)
+        
+        elif self.current_mode == self.MODE_SAM_TRACE:
+            # Handle SAM auto-trace click
+            self._handle_sam_trace_click(coords)
+            return  # Don't update aim lines during trace
         
         elif self.current_mode == self.MODE_TEE:
             self.features.tee = GeoPoint(lat=lat, lon=lon)
@@ -1562,6 +1609,581 @@ class yardbookView:
         # For now, we'll use the aim lines with distance markers
         # Full implementation would use tkinter canvas overlay
         pass
+    
+    # === OSM Import Methods ===
+    
+    def _import_osm_features(self):
+        """Import golf course features from OpenStreetMap."""
+        if not is_osm_available():
+            messagebox.showinfo(
+                "OSM Import Unavailable",
+                "OSM import requires the 'requests' library.\n\n"
+                "Install with:\n  pip install requests\n\n"
+                "Then restart the application."
+            )
+            return
+        
+        # Get center coordinates for the search
+        center_lat, center_lon = self._get_map_center()
+        if center_lat is None:
+            messagebox.showwarning(
+                "No Location",
+                "Please navigate to the hole location first.\n"
+                "Place a tee marker or center the map on the hole."
+            )
+            return
+        
+        # Show progress
+        self.status_label.config(text="Fetching OSM data...")
+        self.window.update()
+        
+        # Import features
+        features, error = import_osm_features(
+            center_lat=center_lat,
+            center_lon=center_lon,
+            radius_meters=500  # Search 500m radius around center
+        )
+        
+        if error:
+            self.status_label.config(text="OSM import failed")
+            messagebox.showerror("OSM Import Error", error)
+            return
+        
+        # Get stats
+        stats = get_osm_feature_stats(features)
+        
+        if not stats:
+            self.status_label.config(text="No features found")
+            messagebox.showinfo(
+                "No Features Found",
+                "No golf features found in OpenStreetMap for this area.\n\n"
+                "This course may not be mapped in OSM.\n"
+                "You can manually draw polygons or try the SAM auto-trace feature."
+            )
+            return
+        
+        # Ask user to confirm import
+        stats_text = "\n".join([f"  • {k.title()}: {v}" for k, v in stats.items()])
+        if not messagebox.askyesno(
+            "Import OSM Features",
+            f"Found the following features:\n{stats_text}\n\n"
+            "Import these features?\n"
+            "(Existing polygons will be replaced)"
+        ):
+            self.status_label.config(text="Import cancelled")
+            return
+        
+        # Add features to the map
+        imported_count = 0
+        for feature_type, polygons in features.items():
+            if not polygons:
+                continue
+            
+            for poly_data in polygons:
+                vertices = poly_data.get("vertices", [])
+                if len(vertices) >= 3:
+                    # Convert to internal polygon format
+                    polygon = Polygon()
+                    for v in vertices:
+                        polygon.add_vertex(v["lat"], v["lon"])
+                    
+                    # Add to features (first polygon of each type, or add as new)
+                    if feature_type in self.features.polygons:
+                        # For simplicity, replace the first polygon of this type
+                        self.features.polygons[feature_type] = polygon
+                        imported_count += 1
+                        break  # Only import first polygon of each type
+        
+        # Render the imported features
+        self._render_all_features()
+        self.unsaved_changes = True
+        
+        self.status_label.config(text=f"Imported {imported_count} features from OSM")
+        messagebox.showinfo(
+            "Import Complete",
+            f"Imported {imported_count} features from OpenStreetMap.\n\n"
+            "Don't forget to save your changes!"
+        )
+    
+    def _get_map_center(self) -> Tuple[Optional[float], Optional[float]]:
+        """Get the current map center coordinates."""
+        # First, try tee position
+        if self.features.tee.is_set():
+            return self.features.tee.lat, self.features.tee.lon
+        
+        # Try green position
+        if self.features.green_front.is_set():
+            return self.features.green_front.lat, self.features.green_front.lon
+        
+        # Try to get from map widget
+        if self.map_widget:
+            try:
+                pos = self.map_widget.get_position()
+                if pos:
+                    return pos[0], pos[1]
+            except:
+                pass
+        
+        # Try course location if available
+        course_lat = self.course_data.get("latitude")
+        course_lon = self.course_data.get("longitude")
+        if course_lat and course_lon:
+            return course_lat, course_lon
+        
+        return None, None
+    
+    # === SAM Auto-Trace Methods ===
+    
+    def _start_sam_autotrace(self):
+        """Start SAM-assisted auto-tracing mode."""
+        # Check if we have a map
+        if not self.map_widget:
+            messagebox.showwarning(
+                "No Map",
+                "The map widget is not available.\n"
+                "Auto-trace requires a visible map."
+            )
+            return
+        
+        # Check SAM availability
+        sam_available = is_sam_available()
+        
+        if sam_available:
+            # Full SAM mode
+            result = messagebox.askyesno(
+                "SAM Auto-Trace",
+                "SAM Auto-Trace Mode\n\n"
+                "Click inside a feature (fairway, green, bunker, water) "
+                "and SAM will automatically trace its boundary.\n\n"
+                "After tracing, you can:\n"
+                "• Accept the polygon\n"
+                "• Adjust vertices manually\n"
+                "• Try again with a different click point\n\n"
+                "Start SAM tracing mode?"
+            )
+        else:
+            # Offer simpler color-based segmentation
+            result = messagebox.askyesno(
+                "Auto-Trace (Simple Mode)",
+                "SAM is not installed. Using simple color-based tracing instead.\n\n"
+                "This mode works best for:\n"
+                "• High-contrast features (water, bunkers)\n"
+                "• Well-defined boundaries\n\n"
+                "For better results, install SAM:\n"
+                "  pip install torch segment-anything\n\n"
+                "Start simple tracing mode?"
+            )
+        
+        if not result:
+            return
+        
+        # Enter SAM/auto-trace mode
+        self.current_mode = self.MODE_SAM_TRACE
+        self.mode_var.set(self.MODE_SAM_TRACE)
+        
+        # Show polygon type selector
+        self.polygon_frame.pack(fill='x', pady=(0, 10))
+        
+        self.status_label.config(
+            text="Auto-Trace: Click inside a feature to trace it"
+        )
+        
+        # Store SAM availability for click handler
+        self._sam_available_for_trace = sam_available
+    
+    def _handle_sam_trace_click(self, coords):
+        """Handle a click in SAM/auto-trace mode."""
+        lat, lon = coords
+        
+        self.status_label.config(text="Tracing... please wait")
+        self.window.update()
+        
+        try:
+            if self._sam_available_for_trace:
+                # Use SAM for tracing
+                polygon_vertices = self._trace_with_sam(lat, lon)
+            else:
+                # Use simple color-based tracing
+                polygon_vertices = self._trace_with_color(lat, lon)
+            
+            if polygon_vertices and len(polygon_vertices) >= 3:
+                # Show the traced polygon for confirmation
+                self._preview_traced_polygon(polygon_vertices)
+            else:
+                messagebox.showinfo(
+                    "Trace Failed",
+                    "Could not trace a feature at this location.\n\n"
+                    "Try clicking:\n"
+                    "• More towards the center of the feature\n"
+                    "• On a more distinct area\n"
+                    "• With higher zoom level"
+                )
+                self.status_label.config(text="Auto-Trace: Click inside a feature to trace it")
+        
+        except Exception as e:
+            messagebox.showerror("Trace Error", f"Error during tracing: {str(e)}")
+            self.status_label.config(text="Auto-Trace: Click inside a feature to trace it")
+    
+    def _trace_with_sam(self, lat: float, lon: float) -> Optional[List[Dict]]:
+        """Trace a feature using SAM."""
+        try:
+            from sam_autotrace import get_tracer, pixels_to_geo
+            
+            tracer = get_tracer()
+            if not tracer or not tracer.is_model_loaded():
+                messagebox.showwarning(
+                    "SAM Not Ready",
+                    "SAM model is not loaded.\n\n"
+                    "Please ensure the model weights are downloaded to:\n"
+                    "Data/sam_vit_h_4b8939.pth"
+                )
+                return None
+            
+            # Capture map image
+            image_data = self._capture_map_image()
+            if image_data is None:
+                return None
+            
+            image, bounds, size = image_data
+            
+            # Set image in SAM
+            if not tracer.set_image(image):
+                return None
+            
+            # Convert geo coords to pixel coords
+            from sam_autotrace import geo_to_pixels
+            pixel_coords = geo_to_pixels([{"lat": lat, "lon": lon}], bounds, size)
+            if not pixel_coords:
+                return None
+            
+            click_x, click_y = pixel_coords[0]
+            
+            # Run SAM segmentation
+            result = tracer.segment_point((click_x, click_y))
+            if not result:
+                return None
+            
+            # Convert pixel polygon to geo coords
+            geo_vertices = pixels_to_geo(result.vertices, bounds, size)
+            
+            return geo_vertices
+            
+        except ImportError:
+            return None
+        except Exception as e:
+            print(f"SAM trace error: {e}")
+            return None
+    
+    def _trace_with_color(self, lat: float, lon: float) -> Optional[List[Dict]]:
+        """Trace a feature using simple color-based flood fill."""
+        try:
+            from PIL import Image, ImageGrab
+            import colorsys
+            
+            # Capture map image
+            image_data = self._capture_map_image()
+            if image_data is None:
+                messagebox.showwarning(
+                    "Capture Failed",
+                    "Could not capture the map image.\n"
+                    "This feature requires the map to be visible on screen."
+                )
+                return None
+            
+            image, bounds, size = image_data
+            
+            # Convert to RGB if needed
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+            
+            pixels = image.load()
+            width, height = image.size
+            
+            # Convert geo coords to pixel coords
+            min_lat, max_lat, min_lon, max_lon = bounds
+            
+            # Calculate pixel position
+            x = int((lon - min_lon) / (max_lon - min_lon) * width)
+            y = int((max_lat - lat) / (max_lat - min_lat) * height)
+            
+            # Ensure within bounds
+            x = max(0, min(x, width - 1))
+            y = max(0, min(y, height - 1))
+            
+            # Get seed color
+            seed_color = pixels[x, y]
+            
+            # Perform flood fill to find connected region
+            mask = self._flood_fill_mask(image, x, y, seed_color, tolerance=30)
+            
+            if mask is None:
+                return None
+            
+            # Convert mask to polygon
+            polygon_pixels = self._mask_to_polygon_simple(mask)
+            
+            if not polygon_pixels or len(polygon_pixels) < 3:
+                return None
+            
+            # Convert pixel coords to geo coords
+            geo_vertices = []
+            for px, py in polygon_pixels:
+                geo_lon = min_lon + (px / width) * (max_lon - min_lon)
+                geo_lat = max_lat - (py / height) * (max_lat - min_lat)
+                geo_vertices.append({"lat": geo_lat, "lon": geo_lon})
+            
+            return geo_vertices
+            
+        except Exception as e:
+            print(f"Color trace error: {e}")
+            return None
+    
+    def _capture_map_image(self):
+        """Capture the current map view as an image."""
+        try:
+            from PIL import ImageGrab
+            
+            # Get map widget screen position
+            self.map_widget.update_idletasks()
+            x = self.map_widget.winfo_rootx()
+            y = self.map_widget.winfo_rooty()
+            width = self.map_widget.winfo_width()
+            height = self.map_widget.winfo_height()
+            
+            # Capture screen region
+            image = ImageGrab.grab(bbox=(x, y, x + width, y + height))
+            
+            # Get map bounds
+            try:
+                pos = self.map_widget.get_position()
+                zoom = self.map_widget.zoom
+                
+                # Approximate bounds based on zoom level
+                # At zoom 20, roughly 0.0001 degrees per pixel
+                deg_per_pixel = 360 / (256 * (2 ** zoom))
+                
+                half_w = (width / 2) * deg_per_pixel
+                half_h = (height / 2) * deg_per_pixel
+                
+                center_lat, center_lon = pos
+                bounds = (
+                    center_lat - half_h,  # min_lat
+                    center_lat + half_h,  # max_lat
+                    center_lon - half_w,  # min_lon
+                    center_lon + half_w   # max_lon
+                )
+            except Exception as e:
+                print(f"Could not get map bounds: {e}")
+                return None
+            
+            return (image, bounds, (width, height))
+            
+        except Exception as e:
+            print(f"Map capture error: {e}")
+            return None
+    
+    def _flood_fill_mask(self, image, start_x, start_y, seed_color, tolerance=30):
+        """Create a binary mask using flood fill from a seed point."""
+        try:
+            import numpy as np
+            
+            img_array = np.array(image)
+            height, width = img_array.shape[:2]
+            
+            # Create mask
+            mask = np.zeros((height, width), dtype=np.uint8)
+            
+            # Convert seed color to numpy array
+            seed = np.array(seed_color, dtype=np.float32)
+            
+            # Stack for flood fill
+            stack = [(start_x, start_y)]
+            visited = set()
+            
+            # Limit iterations to prevent infinite loops
+            max_iterations = width * height // 4
+            iterations = 0
+            
+            while stack and iterations < max_iterations:
+                x, y = stack.pop()
+                iterations += 1
+                
+                if (x, y) in visited:
+                    continue
+                if x < 0 or x >= width or y < 0 or y >= height:
+                    continue
+                
+                visited.add((x, y))
+                
+                # Check color similarity
+                pixel_color = np.array(img_array[y, x], dtype=np.float32)
+                color_diff = np.sqrt(np.sum((pixel_color - seed) ** 2))
+                
+                if color_diff <= tolerance:
+                    mask[y, x] = 255
+                    
+                    # Add neighbors
+                    stack.extend([
+                        (x + 1, y), (x - 1, y),
+                        (x, y + 1), (x, y - 1)
+                    ])
+            
+            # Check if we found a reasonable region
+            filled_pixels = np.sum(mask > 0)
+            total_pixels = width * height
+            
+            if filled_pixels < 100:  # Too small
+                return None
+            if filled_pixels > total_pixels * 0.5:  # Too large (probably background)
+                return None
+            
+            return mask
+            
+        except ImportError:
+            # Fallback without numpy - simpler but slower
+            return self._flood_fill_mask_simple(image, start_x, start_y, seed_color, tolerance)
+        except Exception as e:
+            print(f"Flood fill error: {e}")
+            return None
+    
+    def _flood_fill_mask_simple(self, image, start_x, start_y, seed_color, tolerance):
+        """Simple flood fill without numpy."""
+        width, height = image.size
+        pixels = image.load()
+        
+        mask = [[0] * width for _ in range(height)]
+        
+        def color_distance(c1, c2):
+            return sum((a - b) ** 2 for a, b in zip(c1, c2)) ** 0.5
+        
+        stack = [(start_x, start_y)]
+        visited = set()
+        max_iterations = 50000
+        iterations = 0
+        
+        while stack and iterations < max_iterations:
+            x, y = stack.pop()
+            iterations += 1
+            
+            if (x, y) in visited:
+                continue
+            if x < 0 or x >= width or y < 0 or y >= height:
+                continue
+            
+            visited.add((x, y))
+            
+            pixel_color = pixels[x, y]
+            if color_distance(pixel_color, seed_color) <= tolerance:
+                mask[y][x] = 255
+                stack.extend([
+                    (x + 1, y), (x - 1, y),
+                    (x, y + 1), (x, y - 1)
+                ])
+        
+        return mask
+    
+    def _mask_to_polygon_simple(self, mask) -> List[Tuple[int, int]]:
+        """Convert a binary mask to a polygon outline."""
+        try:
+            import numpy as np
+            
+            if isinstance(mask, list):
+                mask = np.array(mask, dtype=np.uint8)
+            
+            # Find contour using simple edge detection
+            height, width = mask.shape
+            
+            # Find boundary pixels
+            boundary = []
+            for y in range(1, height - 1):
+                for x in range(1, width - 1):
+                    if mask[y, x] > 0:
+                        # Check if on boundary
+                        if (mask[y-1, x] == 0 or mask[y+1, x] == 0 or
+                            mask[y, x-1] == 0 or mask[y, x+1] == 0):
+                            boundary.append((x, y))
+            
+            if len(boundary) < 3:
+                return []
+            
+            # Simplify boundary to polygon (take every Nth point)
+            step = max(1, len(boundary) // 50)  # Limit to ~50 points
+            simplified = boundary[::step]
+            
+            # Sort points to form a proper polygon (by angle from centroid)
+            if simplified:
+                cx = sum(p[0] for p in simplified) / len(simplified)
+                cy = sum(p[1] for p in simplified) / len(simplified)
+                
+                import math
+                simplified.sort(key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
+            
+            return simplified
+            
+        except Exception as e:
+            print(f"Mask to polygon error: {e}")
+            return []
+    
+    def _preview_traced_polygon(self, vertices: List[Dict]):
+        """Show a preview of the traced polygon and let user confirm."""
+        # Create temporary polygon on map
+        if not self.map_widget or not vertices:
+            return
+        
+        # Draw preview polygon
+        coords = [(v["lat"], v["lon"]) for v in vertices]
+        
+        try:
+            preview_path = self.map_widget.set_polygon(
+                coords,
+                fill_color="yellow",
+                outline_color="orange",
+                border_width=3
+            )
+            self._preview_polygon = preview_path
+        except:
+            self._preview_polygon = None
+        
+        # Ask user to confirm
+        polygon_type = self.polygon_type_var.get()
+        
+        result = messagebox.askyesnocancel(
+            "Confirm Traced Polygon",
+            f"Polygon traced with {len(vertices)} vertices.\n\n"
+            f"Save as: {polygon_type.title()}\n\n"
+            "Yes = Save this polygon\n"
+            "No = Discard and try again\n"
+            "Cancel = Exit trace mode"
+        )
+        
+        # Remove preview
+        if self._preview_polygon:
+            try:
+                self._preview_polygon.delete()
+            except:
+                pass
+            self._preview_polygon = None
+        
+        if result is True:
+            # Save the polygon
+            polygon = Polygon()
+            for v in vertices:
+                polygon.add_vertex(v["lat"], v["lon"])
+            
+            self.features.polygons[polygon_type] = polygon
+            self._render_polygon(polygon_type)
+            self.unsaved_changes = True
+            
+            self.status_label.config(text=f"Saved {polygon_type} polygon. Click to trace another or change mode.")
+            
+        elif result is False:
+            # Try again
+            self.status_label.config(text="Auto-Trace: Click inside a feature to trace it")
+            
+        else:
+            # Cancel - exit trace mode
+            self._set_mode(self.MODE_PAN)
+            self.polygon_frame.pack_forget()
     
     def _show_greenbook_view(self):
         """Show a static greenbook-style view with distances drawn on the image."""

@@ -19,6 +19,10 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
+# Import new modules
+from ui_layout import autosize_toplevel, ScrollableFrame, CollapsibleSection
+from hole_plan_ui import open_hole_plan
+
 # Courses file path (must match Backend.py)
 COURSES_FILE = 'Data/courses.json'
 
@@ -69,6 +73,7 @@ class GolfApp:
             ("➕ Add New Course", lambda: self.open_course_window()),
             ("🏌️ Club Distances", self.open_club_distances),
             ("📍 Yardbook", self.open_yardbook),  # NEW: yardbook button
+            ("📝 Hole Plan", self.open_hole_plan),  # NEW: Hole Plan button
             ("📖 Rulebook", self.open_rulebook),
             ("📊 Statistics", self.open_statistics),
         ]
@@ -112,7 +117,6 @@ class GolfApp:
     def open_manage_courses(self):
         win = tk.Toplevel(self.root)
         win.title("Manage Courses")
-        win.geometry("650x450")  # Wider to fit yardbook column
 
         ttk.Label(win, text="Courses by Club", style="Header.TLabel").pack(pady=10)
 
@@ -176,6 +180,9 @@ class GolfApp:
         ttk.Button(btn_frame, text="Delete", command=delete_selected).pack(side='left', padx=5)
         ttk.Button(btn_frame, text="📍 yardbook", command=open_course_yardbook).pack(side='left', padx=5)
         ttk.Button(btn_frame, text="Close", command=win.destroy).pack(side='left', padx=5)
+        
+        # Auto-size the window
+        autosize_toplevel(win, min_size=(650, 400))
 
     # === yardbook: Main yardbook launcher ===
     def open_yardbook(self):
@@ -195,6 +202,16 @@ class GolfApp:
                 "• Calculate accurate yardages\n"
                 "• Draw fairway and hazard overlays"
             )
+
+    # === Hole Plan: Strategy planning launcher ===
+    def open_hole_plan(self):
+        """Open the Hole Plan feature for strategy planning."""
+        open_hole_plan(
+            parent=self.root,
+            backend=self.backend,
+            courses_file=COURSES_FILE,
+            yardbook_integration=self.yardbook
+        )
 
     def open_course_window(self, course=None):
         self.editing_course = course

@@ -126,6 +126,11 @@ class PDFRulebook:
         Parse the Table of Contents directly from the PDF.
         Uses multiple strategies to ensure all chapters/rules are captured.
         Returns list of {'level': int, 'title': str, 'page': int} dicts.
+        
+        Improved to handle chapters 5 and 6 correctly by:
+        1. Scanning more pages for TOC entries
+        2. Using more robust pattern matching
+        3. Actively searching for all 24 rules in the document
         """
         if not self.is_available():
             return []
@@ -143,13 +148,15 @@ class PDFRulebook:
                         'title': title.strip(),
                         'page': page
                     })
+                # Even with built-in TOC, ensure all rules are present
+                entries = self._ensure_all_rules_present(entries)
                 return entries
         except:
             pass
         
-        # Strategy 2: Parse TOC from text content (pages 5-10, extended range)
+        # Strategy 2: Parse TOC from text content (extended range: pages 3-15)
         toc_text = ""
-        for page_num in range(4, 11):
+        for page_num in range(3, 16):
             if page_num < len(self.doc):
                 page = self.doc[page_num]
                 toc_text += page.get_text() + "\n"
@@ -157,35 +164,50 @@ class PDFRulebook:
         lines = toc_text.split('\n')
         i = 0
         
-        # Patterns for matching TOC entries
+        # Enhanced patterns for matching TOC entries
         toc_patterns = [
             # Pattern: backspace character separator (common in PDFs)
             (r'^(.+?)\x08\s*(\d+)$', None),
             # Pattern: dots leading to page number
             (r'^(.+?)\s*\.{2,}\s*(\d+)$', None),
-            # Pattern: Rule with dash/en-dash and title
-            (r'^(Rule\s+\d+[a-z]?\s*[–\-:]\s*.+?)\s+(\d+)$', 2),
+            # Pattern: Rule with various separators (dash, en-dash, colon, space)
+            (r'^(Rule\s+\d+[a-z]?\s*[–\-:\s]+.+?)\s+(\d+)$', 2),
+            # Pattern: Just "Rule X" with page number (handles minimalist TOC)
+            (r'^(Rule\s+\d+[a-z]?)\s+(\d+)$', 2),
             # Pattern: Roman numeral sections
             (r'^([IVX]+\.\s+.+?)\s+(\d+)$', 1),
+            # Pattern: Numbered subsections (5.1, 5.2, etc.)
+            (r'^(\d+\.\d+[a-z]?\s+.+?)\s+(\d+)$', 3),
+            # Pattern: Title followed by multiple spaces and page number
+            (r'^(.{5,}?)\s{3,}(\d+)$', None),
         ]
         
         while i < len(lines):
             line = lines[i].strip()
             
             # Skip empty lines, headers, standalone page numbers
-            if not line or line == "Contents" or (line.isdigit() and len(line) <= 3):
+            if not line or line == "Contents" or line == "Table of Contents":
+                i += 1
+                continue
+            
+            # Skip standalone page numbers
+            if line.isdigit() and len(line) <= 3:
                 i += 1
                 continue
             
             matched = False
             for pattern, forced_level in toc_patterns:
-                match = re.match(pattern, line)
+                match = re.match(pattern, line, re.IGNORECASE)
                 if match:
                     title = match.group(1).strip()
                     page_str = match.group(2).strip()
                     
                     if title and page_str.isdigit():
                         page_num = int(page_str)
+                        
+                        # Skip unreasonable page numbers
+                        if page_num > 500:
+                            continue
                         
                         # Determine hierarchy level
                         level = forced_level if forced_level else self._determine_toc_level(title)
@@ -222,22 +244,33 @@ class PDFRulebook:
             
             i += 1
         
-        # Strategy 4: Ensure all rules 1-24 are present by scanning document
+        # Strategy 4: Ensure all rules 1-24 are present
+        entries = self._ensure_all_rules_present(entries)
+        
+        # Sort entries by page number
+        entries.sort(key=lambda x: x['page'])
+        
+        return entries
+    
+    def _ensure_all_rules_present(self, entries):
+        """
+        Ensure all 24 rules are present in the TOC entries.
+        Searches the document for any missing rules.
+        """
         rules_found = set()
         for entry in entries:
-            match = re.match(r'Rule\s+(\d+)', entry['title'])
+            # Match "Rule X" at start of title
+            match = re.match(r'Rule\s+(\d+)', entry['title'], re.IGNORECASE)
             if match:
                 rules_found.add(int(match.group(1)))
         
-        # Check for missing rules (especially 5 and 6!)
+        # Check for missing rules and find them in the document
         for rule_num in range(1, 25):
             if rule_num not in rules_found:
                 rule_entry = self._find_rule_in_document(rule_num)
                 if rule_entry:
                     entries.append(rule_entry)
-        
-        # Sort entries by page number
-        entries.sort(key=lambda x: x['page'])
+                    rules_found.add(rule_num)
         
         return entries
     
@@ -262,31 +295,63 @@ class PDFRulebook:
         return 2
     
     def _find_rule_in_document(self, rule_num: int):
-        """Search the document for a specific rule heading."""
+        """
+        Search the document for a specific rule heading.
+        Enhanced to handle various formatting of rule headers including chapters 5 and 6.
+        """
         if not self.is_available():
             return None
         
+        # Multiple patterns to match rule headers in various formats
         patterns = [
+            # Standard formats with separators
             rf'Rule\s+{rule_num}\s*[–\-:]\s*([^\n]+)',
             rf'RULE\s+{rule_num}\s*[–\-:]\s*([^\n]+)',
+            # Rule with just space before title
+            rf'Rule\s+{rule_num}\s+([A-Z][^\n]+)',
+            rf'RULE\s+{rule_num}\s+([A-Z][^\n]+)',
+            # Rule on its own line (title may follow)
+            rf'^\s*Rule\s+{rule_num}\s*$',
+            rf'^\s*RULE\s+{rule_num}\s*$',
         ]
         
         for page_num in range(len(self.doc)):
             text = self.get_page_text(page_num)
+            
             for pattern in patterns:
-                match = re.search(pattern, text, re.IGNORECASE)
+                match = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
                 if match:
-                    rule_title = match.group(1).strip()
+                    # Try to get the rule title from the match
+                    if match.lastindex and match.lastindex >= 1:
+                        rule_title = match.group(1).strip()
+                    else:
+                        # Title not captured, try to extract from next line
+                        match_end = match.end()
+                        remaining = text[match_end:match_end + 200]
+                        title_match = re.match(r'\s*[–\-:]?\s*([A-Z][^\n]+)', remaining)
+                        if title_match:
+                            rule_title = title_match.group(1).strip()
+                        else:
+                            rule_title = f"Rule {rule_num}"
+                    
                     # Clean up the title
                     rule_title = re.sub(r'\s+', ' ', rule_title)
-                    if len(rule_title) > 50:
-                        rule_title = rule_title[:50] + "..."
+                    # Remove trailing numbers that might be page numbers
+                    rule_title = re.sub(r'\s+\d+\s*$', '', rule_title)
+                    if len(rule_title) > 60:
+                        rule_title = rule_title[:60] + "..."
+                    
+                    # Avoid generic titles
+                    if rule_title.lower().strip() == f"rule {rule_num}":
+                        rule_title = f"Rule {rule_num}"
                     
                     return {
                         'level': 2,
-                        'title': f"Rule {rule_num} – {rule_title}",
+                        'title': f"Rule {rule_num} – {rule_title}" if rule_title != f"Rule {rule_num}" else rule_title,
                         'page': page_num + 1
                     }
+        
+        return None
         
         return None
     
