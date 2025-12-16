@@ -18,42 +18,18 @@ def _check_map_available():
 
 _map_available, tkintermapview = _check_map_available()
 
-# Import OSM and SAM modules with graceful fallback
-try:
-    from osm_import import is_osm_available, import_osm_features, get_osm_feature_stats
-    _osm_module_available = True
-except ImportError:
-    _osm_module_available = False
-    def is_osm_available(): return False
-    def import_osm_features(*args, **kwargs): return {}, "OSM module not available"
-    def get_osm_feature_stats(f): return {}
-
-try:
-    from sam_autotrace import is_sam_available, get_sam_unavailable_message
-    _sam_module_available = True
-except ImportError:
-    _sam_module_available = False
-    def is_sam_available(): return False
-    def get_sam_unavailable_message(): return "SAM module not available"
-
-from Yardbook.yardbook_geo import (
-    generate_distance_ring,
-    midpoint,
-    calculate_hole_distances,
-    validate_yardage_difference,
-    haversine_distance,
-    bearing,
-    destination_point,
-)
-from Yardbook.yardbook_data import (
-    yardbookManager,
-    GeoPoint,
-    Target,
-    Hazard,
-    Polygon,
-    DISTANCE_RING_PRESETS,
-    POLYGON_STYLES,
-    MARKER_STYLES
+# Import from consolidated Backend module
+from Backend import (
+    # OSM functions
+    is_osm_available, import_osm_features, get_osm_feature_stats,
+    # SAM functions
+    is_sam_available, get_sam_unavailable_message,
+    # Geospatial functions
+    generate_distance_ring, midpoint, calculate_hole_distances,
+    validate_yardage_difference, haversine_distance, bearing, destination_point,
+    # Data classes and manager
+    yardbookManager, GeoPoint, Target, Hazard, Polygon,
+    DISTANCE_RING_PRESETS, POLYGON_STYLES, MARKER_STYLES
 )
 
 

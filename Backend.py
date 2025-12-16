@@ -1,8 +1,11 @@
 import json
 import os
 import re
+import math
 from statistics import mean
 from datetime import datetime
+from typing import Dict, List, Optional, Tuple, Any
+from dataclasses import dataclass, field
 
 
 # Runtime capability detection for PyMuPDF
@@ -16,6 +19,47 @@ def _check_pymupdf():
 
 _pymupdf_available, fitz = _check_pymupdf()
 
+
+# Runtime capability detection for requests (OSM import)
+def _check_requests():
+    """Check if requests library is available."""
+    try:
+        import requests
+        return True, requests
+    except ImportError:
+        return False, None
+
+_requests_available, requests = _check_requests()
+
+
+# Runtime capability detection for SAM (auto-trace)
+_sam_available = False
+_sam_error = None
+_numpy_available = False
+_cv2_available = False
+
+try:
+    import numpy as np
+    from PIL import Image
+    _numpy_available = True
+except ImportError as e:
+    _sam_error = f"NumPy/PIL not available: {e}"
+
+try:
+    import cv2
+    _cv2_available = True
+except ImportError:
+    if not _sam_error:
+        _sam_error = "OpenCV (cv2) not available. Install with: pip install opencv-python"
+
+try:
+    import torch
+    from segment_anything import sam_model_registry, SamPredictor
+    _sam_available = True
+except ImportError as e:
+    if not _sam_error:
+        _sam_error = f"SAM dependencies not available: {e}"
+
 # --- Data files ---
 COURSES_FILE = 'Data/courses.json'
 ROUNDS_FILE = 'Data/rounds.json'
@@ -28,6 +72,21 @@ PDF_ANNOTATIONS_FILE = 'Data/pdf_annotations.json'  # Highlights and notes on PD
 PAGE_BOOKMARKS_FILE = 'Data/page_bookmarks.json'  # Bookmarked page numbers
 STATS_CACHE_FILE = 'Data/stats_cache.json'  # Cached computed statistics
 USER_PREFS_FILE = 'Data/user_prefs.json'  # User preferences (entry mode, etc.)
+
+# OSM Import constants
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+GOLF_TAGS = {
+    "fairway": {"tags": [("golf", "fairway")], "polygon_type": "fairway"},
+    "green": {"tags": [("golf", "green"), ("golf", "putting_green")], "polygon_type": "green"},
+    "bunker": {"tags": [("golf", "bunker"), ("golf", "sand_trap")], "polygon_type": "bunker"},
+    "tee": {"tags": [("golf", "tee")], "polygon_type": "tee"},
+    "water": {"tags": [("natural", "water"), ("golf", "water_hazard"), ("water", "pond"), ("water", "lake")], "polygon_type": "water"},
+    "rough": {"tags": [("golf", "rough"), ("landuse", "grass")], "polygon_type": "native"},
+}
+
+# SAM Auto-trace constants
+SAM_MODEL_TYPE = "vit_h"
+SAM_CHECKPOINT_PATH = "Data/sam_vit_h_4b8939.pth"
 
 # Club categories for analytics
 CLUB_CATEGORIES = {
@@ -67,6 +126,1290 @@ def save_json(filename, data):
     with open(filename, 'w') as f:
         json.dump(data, f, indent=2)
 
+
+# ============================================================================
+# GEOSPATIAL CALCULATIONS (from yardbook_geo.py)
+# ============================================================================
+
+EARTH_RADIUS_METERS = 6_371_000  # Mean Earth radius in meters
+METERS_TO_YARDS = 1.09361
+
+
+def haversine_distance(
+    lat1: float, lon1: float, 
+    lat2: float, lon2: float
+) -> float:
+    """
+    Calculate the great-circle distance between two points on Earth.
+    
+    Args:
+        lat1, lon1: Latitude and longitude of point 1 (decimal degrees)
+        lat2, lon2: Latitude and longitude of point 2 (decimal degrees)
+    
+    Returns:
+        Distance in yards
+    """
+    lat1_rad = math.radians(lat1)
+    lat2_rad = math.radians(lat2)
+    delta_lat = math.radians(lat2 - lat1)
+    delta_lon = math.radians(lon2 - lon1)
+    
+    a = (math.sin(delta_lat / 2) ** 2 + 
+         math.cos(lat1_rad) * math.cos(lat2_rad) * 
+         math.sin(delta_lon / 2) ** 2)
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    
+    distance_meters = EARTH_RADIUS_METERS * c
+    return round(distance_meters * METERS_TO_YARDS, 1)
+
+
+def bearing(
+    lat1: float, lon1: float,
+    lat2: float, lon2: float
+) -> float:
+    """
+    Calculate the initial bearing from point 1 to point 2.
+    
+    Returns:
+        Bearing in degrees (0-360, where 0/360 is North)
+    """
+    lat1_rad = math.radians(lat1)
+    lat2_rad = math.radians(lat2)
+    delta_lon = math.radians(lon2 - lon1)
+    
+    x = math.sin(delta_lon) * math.cos(lat2_rad)
+    y = (math.cos(lat1_rad) * math.sin(lat2_rad) - 
+         math.sin(lat1_rad) * math.cos(lat2_rad) * math.cos(delta_lon))
+    
+    bearing_rad = math.atan2(x, y)
+    bearing_deg = math.degrees(bearing_rad)
+    
+    return (bearing_deg + 360) % 360
+
+
+def destination_point(
+    lat: float, lon: float,
+    bearing_deg: float, distance_yards: float
+) -> Tuple[float, float]:
+    """
+    Calculate the destination point given start point, bearing, and distance.
+    
+    Returns:
+        Tuple of (latitude, longitude) of destination point
+    """
+    distance_meters = distance_yards / METERS_TO_YARDS
+    angular_distance = distance_meters / EARTH_RADIUS_METERS
+    
+    lat_rad = math.radians(lat)
+    lon_rad = math.radians(lon)
+    bearing_rad = math.radians(bearing_deg)
+    
+    dest_lat_rad = math.asin(
+        math.sin(lat_rad) * math.cos(angular_distance) +
+        math.cos(lat_rad) * math.sin(angular_distance) * math.cos(bearing_rad)
+    )
+    
+    dest_lon_rad = lon_rad + math.atan2(
+        math.sin(bearing_rad) * math.sin(angular_distance) * math.cos(lat_rad),
+        math.cos(angular_distance) - math.sin(lat_rad) * math.sin(dest_lat_rad)
+    )
+    
+    return (math.degrees(dest_lat_rad), math.degrees(dest_lon_rad))
+
+
+def generate_distance_ring(
+    center_lat: float, center_lon: float,
+    distance_yards: float,
+    num_points: int = 72
+) -> List[Tuple[float, float]]:
+    """Generate points forming a circle at a given distance from center."""
+    points = []
+    for i in range(num_points + 1):
+        angle = (360.0 / num_points) * i
+        point = destination_point(center_lat, center_lon, angle, distance_yards)
+        points.append(point)
+    return points
+
+
+def generate_arc(
+    center_lat: float, center_lon: float,
+    distance_yards: float,
+    start_bearing: float,
+    end_bearing: float,
+    num_points: int = 36
+) -> List[Tuple[float, float]]:
+    """Generate an arc segment (partial circle) at a given distance."""
+    points = []
+    
+    if end_bearing < start_bearing:
+        end_bearing += 360
+    
+    angle_step = (end_bearing - start_bearing) / num_points
+    
+    for i in range(num_points + 1):
+        angle = (start_bearing + angle_step * i) % 360
+        point = destination_point(center_lat, center_lon, angle, distance_yards)
+        points.append(point)
+    
+    return points
+
+
+def midpoint(
+    lat1: float, lon1: float,
+    lat2: float, lon2: float
+) -> Tuple[float, float]:
+    """Calculate the midpoint between two coordinates."""
+    lat1_rad = math.radians(lat1)
+    lat2_rad = math.radians(lat2)
+    lon1_rad = math.radians(lon1)
+    delta_lon = math.radians(lon2 - lon1)
+    
+    bx = math.cos(lat2_rad) * math.cos(delta_lon)
+    by = math.cos(lat2_rad) * math.sin(delta_lon)
+    
+    mid_lat = math.atan2(
+        math.sin(lat1_rad) + math.sin(lat2_rad),
+        math.sqrt((math.cos(lat1_rad) + bx) ** 2 + by ** 2)
+    )
+    mid_lon = lon1_rad + math.atan2(by, math.cos(lat1_rad) + bx)
+    
+    return (math.degrees(mid_lat), math.degrees(mid_lon))
+
+
+def polygon_centroid(vertices: List[Tuple[float, float]]) -> Tuple[float, float]:
+    """Calculate the centroid of a polygon."""
+    if not vertices:
+        return (0.0, 0.0)
+    
+    avg_lat = sum(v[0] for v in vertices) / len(vertices)
+    avg_lon = sum(v[1] for v in vertices) / len(vertices)
+    return (avg_lat, avg_lon)
+
+
+def calculate_hole_distances(map_features: Dict) -> Dict:
+    """Calculate all relevant distances for a hole from its map features."""
+    distances = {
+        "tee_to_green_front": None,
+        "tee_to_green_back": None,
+        "tee_to_green_center": None,
+        "green_depth": None,
+        "targets": [],
+        "hazards": []
+    }
+    
+    tee = map_features.get("tee")
+    green_front = map_features.get("green_front")
+    green_back = map_features.get("green_back")
+    
+    if not tee:
+        return distances
+    
+    tee_lat, tee_lon = tee.get("lat"), tee.get("lon")
+    if tee_lat is None or tee_lon is None:
+        return distances
+    
+    if green_front and green_front.get("lat") is not None:
+        gf_lat, gf_lon = green_front["lat"], green_front["lon"]
+        distances["tee_to_green_front"] = haversine_distance(
+            tee_lat, tee_lon, gf_lat, gf_lon
+        )
+        
+        if green_back and green_back.get("lat") is not None:
+            gb_lat, gb_lon = green_back["lat"], green_back["lon"]
+            distances["tee_to_green_back"] = haversine_distance(
+                tee_lat, tee_lon, gb_lat, gb_lon
+            )
+            distances["green_depth"] = haversine_distance(
+                gf_lat, gf_lon, gb_lat, gb_lon
+            )
+            
+            center = midpoint(gf_lat, gf_lon, gb_lat, gb_lon)
+            distances["tee_to_green_center"] = haversine_distance(
+                tee_lat, tee_lon, center[0], center[1]
+            )
+    
+    for target in map_features.get("targets", []):
+        if target.get("lat") is not None:
+            t_lat, t_lon = target["lat"], target["lon"]
+            dist_from_tee = haversine_distance(tee_lat, tee_lon, t_lat, t_lon)
+            
+            dist_to_green = None
+            if green_front and green_front.get("lat") is not None:
+                dist_to_green = haversine_distance(
+                    t_lat, t_lon, 
+                    green_front["lat"], green_front["lon"]
+                )
+            
+            distances["targets"].append({
+                "name": target.get("name", "Target"),
+                "from_tee": dist_from_tee,
+                "to_green": dist_to_green
+            })
+    
+    for hazard in map_features.get("hazards", []):
+        if hazard.get("lat") is not None:
+            h_lat, h_lon = hazard["lat"], hazard["lon"]
+            dist_from_tee = haversine_distance(tee_lat, tee_lon, h_lat, h_lon)
+            
+            distances["hazards"].append({
+                "type": hazard.get("type", "hazard"),
+                "from_tee": dist_from_tee
+            })
+    
+    return distances
+
+
+def validate_yardage_difference(
+    map_distance: float,
+    scorecard_yardage: int,
+    tolerance_percent: float = 10.0
+) -> Tuple[bool, float]:
+    """Check if the map-calculated distance differs significantly from scorecard."""
+    if scorecard_yardage == 0:
+        return (True, 0.0)
+    
+    diff = abs(map_distance - scorecard_yardage)
+    percent_diff = (diff / scorecard_yardage) * 100
+    
+    return (percent_diff <= tolerance_percent, round(percent_diff, 1))
+
+
+def polygon_area_sqyards(vertices: List[Tuple[float, float]]) -> float:
+    """Calculate approximate area of a polygon in square yards."""
+    if len(vertices) < 3:
+        return 0.0
+    
+    centroid = polygon_centroid(vertices)
+    
+    local_coords = []
+    for v in vertices:
+        x = haversine_distance(centroid[0], centroid[1], centroid[0], v[1])
+        if v[1] < centroid[1]:
+            x = -x
+        
+        y = haversine_distance(centroid[0], centroid[1], v[0], centroid[1])
+        if v[0] < centroid[0]:
+            y = -y
+        
+        local_coords.append((x, y))
+    
+    n = len(local_coords)
+    area = 0.0
+    for i in range(n):
+        j = (i + 1) % n
+        area += local_coords[i][0] * local_coords[j][1]
+        area -= local_coords[j][0] * local_coords[i][1]
+    
+    return abs(area) / 2.0
+
+
+# ============================================================================
+# YARDBOOK DATA MODELS (from yardbook_data.py)
+# ============================================================================
+
+@dataclass
+class GeoPoint:
+    """A geographic point with latitude and longitude."""
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    
+    def is_set(self) -> bool:
+        return self.lat is not None and self.lon is not None
+    
+    def to_dict(self) -> Dict:
+        return {"lat": self.lat, "lon": self.lon}
+    
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'GeoPoint':
+        if not data:
+            return cls()
+        return cls(lat=data.get("lat"), lon=data.get("lon"))
+
+
+@dataclass 
+class Target:
+    """A target point on the hole (layup, landing zone, etc.)."""
+    name: str = "Target"
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    
+    def to_dict(self) -> Dict:
+        return {"name": self.name, "lat": self.lat, "lon": self.lon}
+    
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'Target':
+        return cls(
+            name=data.get("name", "Target"),
+            lat=data.get("lat"),
+            lon=data.get("lon")
+        )
+
+
+@dataclass
+class Hazard:
+    """A hazard point (water, bunker, OB, etc.)."""
+    hazard_type: str = "water"
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    
+    def to_dict(self) -> Dict:
+        return {"type": self.hazard_type, "lat": self.lat, "lon": self.lon}
+    
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'Hazard':
+        return cls(
+            hazard_type=data.get("type", "water"),
+            lat=data.get("lat"),
+            lon=data.get("lon")
+        )
+
+
+@dataclass
+class Polygon:
+    """A polygon overlay (fairway, green, water, bunker)."""
+    vertices: List[Dict] = field(default_factory=list)
+    
+    def add_vertex(self, lat: float, lon: float):
+        self.vertices.append({"lat": lat, "lon": lon})
+    
+    def remove_last_vertex(self):
+        if self.vertices:
+            self.vertices.pop()
+    
+    def clear(self):
+        self.vertices = []
+    
+    def is_valid(self) -> bool:
+        return len(self.vertices) >= 3
+    
+    def to_list(self) -> List[Dict]:
+        return self.vertices
+    
+    @classmethod
+    def from_list(cls, data: List) -> 'Polygon':
+        poly = cls()
+        if data:
+            poly.vertices = data
+        return poly
+
+
+@dataclass
+class HoleMapFeatures:
+    """All map features for a single hole."""
+    tee: GeoPoint = field(default_factory=GeoPoint)
+    green_front: GeoPoint = field(default_factory=GeoPoint)
+    green_back: GeoPoint = field(default_factory=GeoPoint)
+    targets: List[Target] = field(default_factory=list)
+    hazards: List[Hazard] = field(default_factory=list)
+    polygons: Dict[str, Polygon] = field(default_factory=dict)
+    slope_arrows: List[Dict] = field(default_factory=list)
+    notes: str = ""
+    last_modified: str = ""
+    
+    def __post_init__(self):
+        default_polygon_types = ["fairway", "green", "water", "bunker", "native"]
+        for ptype in default_polygon_types:
+            if ptype not in self.polygons:
+                self.polygons[ptype] = Polygon()
+    
+    def to_dict(self) -> Dict:
+        return {
+            "tee": self.tee.to_dict(),
+            "green_front": self.green_front.to_dict(),
+            "green_back": self.green_back.to_dict(),
+            "targets": [t.to_dict() for t in self.targets],
+            "hazards": [h.to_dict() for h in self.hazards],
+            "polygons": {k: v.to_list() for k, v in self.polygons.items() if v.is_valid()},
+            "slope_arrows": self.slope_arrows,
+            "notes": self.notes,
+            "last_modified": self.last_modified
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict) -> 'HoleMapFeatures':
+        if not data:
+            return cls()
+        
+        features = cls(
+            tee=GeoPoint.from_dict(data.get("tee", {})),
+            green_front=GeoPoint.from_dict(data.get("green_front", {})),
+            green_back=GeoPoint.from_dict(data.get("green_back", {})),
+            notes=data.get("notes", ""),
+            last_modified=data.get("last_modified", "")
+        )
+        
+        for t_data in data.get("targets", []):
+            features.targets.append(Target.from_dict(t_data))
+        
+        for h_data in data.get("hazards", []):
+            features.hazards.append(Hazard.from_dict(h_data))
+        
+        for ptype, vertices in data.get("polygons", {}).items():
+            features.polygons[ptype] = Polygon.from_list(vertices)
+        
+        features.slope_arrows = data.get("slope_arrows", [])
+        
+        return features
+    
+    def clear_all(self):
+        """Reset all map features."""
+        self.tee = GeoPoint()
+        self.green_front = GeoPoint()
+        self.green_back = GeoPoint()
+        self.targets = []
+        self.hazards = []
+        for poly in self.polygons.values():
+            poly.clear()
+        self.slope_arrows = []
+        self.notes = ""
+    
+    def has_data(self) -> bool:
+        """Check if any map features have been set."""
+        if self.tee.is_set() or self.green_front.is_set() or self.green_back.is_set():
+            return True
+        if self.targets or self.hazards:
+            return True
+        for poly in self.polygons.values():
+            if poly.is_valid():
+                return True
+        return False
+
+
+class yardbookManager:
+    """Manages yardbook data for courses."""
+    
+    def __init__(self, courses_file: str):
+        self.courses_file = courses_file
+        self._cache: Dict[str, Dict[int, HoleMapFeatures]] = {}
+    
+    def _load_courses(self) -> List[Dict]:
+        if not os.path.exists(self.courses_file):
+            return []
+        with open(self.courses_file, 'r') as f:
+            return json.load(f)
+    
+    def _save_courses(self, courses: List[Dict]):
+        with open(self.courses_file, 'w') as f:
+            json.dump(courses, f, indent=2)
+    
+    def get_hole_features(self, course_name: str, hole_num: int) -> HoleMapFeatures:
+        cache_key = course_name
+        if cache_key in self._cache and hole_num in self._cache[cache_key]:
+            return self._cache[cache_key][hole_num]
+        
+        courses = self._load_courses()
+        for course in courses:
+            if course.get("name") == course_name:
+                holes_data = course.get("holes", {})
+                hole_key = str(hole_num)
+                
+                if hole_key in holes_data:
+                    hole_data = holes_data[hole_key]
+                    map_features_data = hole_data.get("map_features", {})
+                    features = HoleMapFeatures.from_dict(map_features_data)
+                else:
+                    features = HoleMapFeatures()
+                
+                if cache_key not in self._cache:
+                    self._cache[cache_key] = {}
+                self._cache[cache_key][hole_num] = features
+                
+                return features
+        
+        return HoleMapFeatures()
+    
+    def save_hole_features(self, course_name: str, hole_num: int, features: HoleMapFeatures):
+        features.last_modified = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        courses = self._load_courses()
+        
+        for course in courses:
+            if course.get("name") == course_name:
+                if "holes" not in course:
+                    course["holes"] = {}
+                
+                hole_key = str(hole_num)
+                
+                if hole_key not in course["holes"]:
+                    course["holes"][hole_key] = {}
+                
+                pars = course.get("pars", [])
+                if hole_num <= len(pars):
+                    course["holes"][hole_key]["par"] = pars[hole_num - 1]
+                
+                course["holes"][hole_key]["map_features"] = features.to_dict()
+                
+                break
+        
+        self._save_courses(courses)
+        
+        cache_key = course_name
+        if cache_key not in self._cache:
+            self._cache[cache_key] = {}
+        self._cache[cache_key][hole_num] = features
+    
+    def clear_hole_features(self, course_name: str, hole_num: int):
+        features = HoleMapFeatures()
+        self.save_hole_features(course_name, hole_num, features)
+    
+    def get_course_yardbook_summary(self, course_name: str) -> Dict:
+        courses = self._load_courses()
+        
+        for course in courses:
+            if course.get("name") == course_name:
+                num_holes = len(course.get("pars", []))
+                holes_with_data = 0
+                holes_complete = 0
+                
+                holes_data = course.get("holes", {})
+                
+                for h in range(1, num_holes + 1):
+                    hole_key = str(h)
+                    if hole_key in holes_data:
+                        map_features = holes_data[hole_key].get("map_features", {})
+                        if map_features:
+                            features = HoleMapFeatures.from_dict(map_features)
+                            if features.has_data():
+                                holes_with_data += 1
+                                if features.tee.is_set() and features.green_front.is_set():
+                                    holes_complete += 1
+                
+                return {
+                    "total_holes": num_holes,
+                    "holes_with_data": holes_with_data,
+                    "holes_complete": holes_complete,
+                    "completion_percent": round((holes_complete / num_holes) * 100, 1) if num_holes > 0 else 0
+                }
+        
+        return {"total_holes": 0, "holes_with_data": 0, "holes_complete": 0, "completion_percent": 0}
+    
+    def invalidate_cache(self, course_name: Optional[str] = None):
+        if course_name:
+            self._cache.pop(course_name, None)
+        else:
+            self._cache.clear()
+
+
+# Yardbook UI presets
+DISTANCE_RING_PRESETS = {
+    "driver": {"distance": 250, "color": "#FF6B6B", "label": "Driver"},
+    "3_wood": {"distance": 225, "color": "#4ECDC4", "label": "3 Wood"},
+    "5_wood": {"distance": 200, "color": "#45B7D1", "label": "5 Wood"},
+    "hybrid": {"distance": 180, "color": "#96CEB4", "label": "Hybrid"},
+    "5_iron": {"distance": 160, "color": "#FFEAA7", "label": "5 Iron"},
+    "7_iron": {"distance": 140, "color": "#DDA0DD", "label": "7 Iron"},
+    "9_iron": {"distance": 120, "color": "#98D8C8", "label": "9 Iron"},
+    "pw": {"distance": 100, "color": "#F7DC6F", "label": "PW"},
+}
+
+POLYGON_STYLES = {
+    "fairway": {"fill_color": "#90EE90", "outline_color": "#228B22", "fill_opacity": 0.3, "label": "Fairway"},
+    "green": {"fill_color": "#006400", "outline_color": "#004000", "fill_opacity": 0.5, "label": "Green"},
+    "water": {"fill_color": "#1E90FF", "outline_color": "#0000CD", "fill_opacity": 0.4, "label": "Water"},
+    "bunker": {"fill_color": "#F4E4C1", "outline_color": "#C4A961", "fill_opacity": 0.5, "label": "Bunker"},
+    "native": {"fill_color": "#8B4513", "outline_color": "#654321", "fill_opacity": 0.3, "label": "Native/Waste"}
+}
+
+MARKER_STYLES = {
+    "tee": {"color": "#FF4444", "label": "T", "size": 12},
+    "green_front": {"color": "#44FF44", "label": "F", "size": 10},
+    "green_back": {"color": "#44FF44", "label": "B", "size": 10},
+    "target": {"color": "#FFFF44", "label": "●", "size": 10},
+    "hazard_water": {"color": "#4444FF", "label": "W", "size": 10},
+    "hazard_bunker": {"color": "#F4E4C1", "label": "S", "size": 10},
+    "hazard_ob": {"color": "#FFFFFF", "label": "OB", "size": 10},
+}
+
+
+# ============================================================================
+# OSM IMPORT FUNCTIONS (from osm_import.py)
+# ============================================================================
+
+@dataclass
+class OSMPolygon:
+    """Represents a polygon from OSM data."""
+    osm_id: int
+    feature_type: str
+    vertices: List[Dict[str, float]]
+    name: Optional[str] = None
+    tags: Dict[str, str] = None
+
+
+def is_osm_available() -> bool:
+    """Check if OSM import feature is available."""
+    return _requests_available
+
+
+def build_overpass_query(
+    center_lat: float,
+    center_lon: float,
+    radius_meters: int = 500,
+    feature_types: Optional[List[str]] = None
+) -> str:
+    """Build an Overpass QL query for golf features around a center point."""
+    if feature_types is None:
+        feature_types = list(GOLF_TAGS.keys())
+    
+    tag_filters = []
+    for ftype in feature_types:
+        if ftype in GOLF_TAGS:
+            for key, value in GOLF_TAGS[ftype]["tags"]:
+                tag_filters.append(f'way["{key}"="{value}"](around:{radius_meters},{center_lat},{center_lon});')
+                tag_filters.append(f'relation["{key}"="{value}"](around:{radius_meters},{center_lat},{center_lon});')
+    
+    tag_filters.append(f'way["golf"](around:{radius_meters},{center_lat},{center_lon});')
+    
+    query = f"""
+    [out:json][timeout:30];
+    (
+        {chr(10).join(tag_filters)}
+    );
+    out body;
+    >;
+    out skel qt;
+    """
+    
+    return query
+
+
+def build_bbox_query(
+    min_lat: float,
+    min_lon: float,
+    max_lat: float,
+    max_lon: float,
+    feature_types: Optional[List[str]] = None
+) -> str:
+    """Build an Overpass QL query for golf features within a bounding box."""
+    if feature_types is None:
+        feature_types = list(GOLF_TAGS.keys())
+    
+    bbox = f"{min_lat},{min_lon},{max_lat},{max_lon}"
+    
+    tag_filters = []
+    for ftype in feature_types:
+        if ftype in GOLF_TAGS:
+            for key, value in GOLF_TAGS[ftype]["tags"]:
+                tag_filters.append(f'way["{key}"="{value}"]({bbox});')
+                tag_filters.append(f'relation["{key}"="{value}"]({bbox});')
+    
+    tag_filters.append(f'way["golf"]({bbox});')
+    
+    query = f"""
+    [out:json][timeout:30];
+    (
+        {chr(10).join(tag_filters)}
+    );
+    out body;
+    >;
+    out skel qt;
+    """
+    
+    return query
+
+
+def fetch_osm_data(query: str) -> Optional[Dict]:
+    """Execute an Overpass query and return the results."""
+    if not _requests_available:
+        return None
+    
+    try:
+        response = requests.post(
+            OVERPASS_URL,
+            data={"data": query},
+            timeout=60
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        print(f"OSM fetch error: {e}")
+        return None
+    except json.JSONDecodeError as e:
+        print(f"OSM JSON parse error: {e}")
+        return None
+
+
+def parse_osm_response(data: Dict) -> List[OSMPolygon]:
+    """Parse Overpass API response into OSMPolygon objects."""
+    if not data or "elements" not in data:
+        return []
+    
+    elements = data["elements"]
+    
+    nodes = {}
+    for elem in elements:
+        if elem.get("type") == "node":
+            nodes[elem["id"]] = (elem["lat"], elem["lon"])
+    
+    polygons = []
+    
+    for elem in elements:
+        if elem.get("type") != "way":
+            continue
+        
+        node_refs = elem.get("nodes", [])
+        if len(node_refs) < 3:
+            continue
+        
+        vertices = []
+        for node_id in node_refs:
+            if node_id in nodes:
+                lat, lon = nodes[node_id]
+                vertices.append({"lat": lat, "lon": lon})
+        
+        if len(vertices) < 3:
+            continue
+        
+        tags = elem.get("tags", {})
+        feature_type = determine_feature_type(tags)
+        
+        if feature_type:
+            polygon = OSMPolygon(
+                osm_id=elem["id"],
+                feature_type=feature_type,
+                vertices=vertices,
+                name=tags.get("name"),
+                tags=tags
+            )
+            polygons.append(polygon)
+    
+    return polygons
+
+
+def determine_feature_type(tags: Dict[str, str]) -> Optional[str]:
+    """Determine the golf feature type from OSM tags."""
+    golf_tag = tags.get("golf", "")
+    natural_tag = tags.get("natural", "")
+    water_tag = tags.get("water", "")
+    
+    if golf_tag == "fairway":
+        return "fairway"
+    elif golf_tag in ("green", "putting_green"):
+        return "green"
+    elif golf_tag in ("bunker", "sand_trap"):
+        return "bunker"
+    elif golf_tag == "tee":
+        return "tee"
+    elif golf_tag == "water_hazard":
+        return "water"
+    elif golf_tag == "rough":
+        return "native"
+    
+    if natural_tag == "water" or water_tag in ("pond", "lake"):
+        return "water"
+    
+    return None
+
+
+def convert_to_internal_format(polygons: List[OSMPolygon]) -> Dict[str, List[Dict]]:
+    """Convert OSMPolygon objects to the internal yardbook polygon format."""
+    result = {
+        "fairway": [],
+        "green": [],
+        "bunker": [],
+        "water": [],
+        "native": [],
+        "tee": []
+    }
+    
+    for poly in polygons:
+        ptype = poly.feature_type
+        if ptype in result:
+            result[ptype].append({
+                "osm_id": poly.osm_id,
+                "vertices": poly.vertices,
+                "name": poly.name
+            })
+    
+    return result
+
+
+def import_osm_features(
+    center_lat: float,
+    center_lon: float,
+    radius_meters: int = 500,
+    feature_types: Optional[List[str]] = None
+) -> Tuple[Dict[str, List[Dict]], Optional[str]]:
+    """Import golf course features from OSM for a given location."""
+    if not is_osm_available():
+        return {}, "OSM import requires the 'requests' library.\nInstall with: pip install requests"
+    
+    query = build_overpass_query(center_lat, center_lon, radius_meters, feature_types)
+    data = fetch_osm_data(query)
+    
+    if data is None:
+        return {}, "Failed to fetch data from OpenStreetMap.\nPlease check your internet connection."
+    
+    polygons = parse_osm_response(data)
+    
+    if not polygons:
+        return {}, "No golf features found in this area.\nTry increasing the search radius or use manual polygon drawing."
+    
+    features = convert_to_internal_format(polygons)
+    
+    return features, None
+
+
+def import_osm_features_bbox(
+    min_lat: float,
+    min_lon: float,
+    max_lat: float,
+    max_lon: float,
+    feature_types: Optional[List[str]] = None
+) -> Tuple[Dict[str, List[Dict]], Optional[str]]:
+    """Import golf course features from OSM for a bounding box."""
+    if not is_osm_available():
+        return {}, "OSM import requires the 'requests' library.\nInstall with: pip install requests"
+    
+    query = build_bbox_query(min_lat, min_lon, max_lat, max_lon, feature_types)
+    data = fetch_osm_data(query)
+    
+    if data is None:
+        return {}, "Failed to fetch data from OpenStreetMap."
+    
+    polygons = parse_osm_response(data)
+    
+    if not polygons:
+        return {}, "No golf features found in this area."
+    
+    return convert_to_internal_format(polygons), None
+
+
+def simplify_polygon(vertices: List[Dict], tolerance: float = 0.00001) -> List[Dict]:
+    """Simplify a polygon using the Ramer-Douglas-Peucker algorithm."""
+    if len(vertices) <= 3:
+        return vertices
+    
+    def point_line_distance(point, line_start, line_end):
+        if line_start == line_end:
+            return ((point['lat'] - line_start['lat'])**2 + 
+                    (point['lon'] - line_start['lon'])**2)**0.5
+        
+        dx = line_end['lon'] - line_start['lon']
+        dy = line_end['lat'] - line_start['lat']
+        
+        t = max(0, min(1, 
+            ((point['lon'] - line_start['lon']) * dx + 
+             (point['lat'] - line_start['lat']) * dy) / 
+            (dx * dx + dy * dy)))
+        
+        proj_lon = line_start['lon'] + t * dx
+        proj_lat = line_start['lat'] + t * dy
+        
+        return ((point['lat'] - proj_lat)**2 + (point['lon'] - proj_lon)**2)**0.5
+    
+    def rdp(points, start, end, tolerance):
+        if end - start < 2:
+            return []
+        
+        max_dist = 0
+        max_idx = start
+        
+        for i in range(start + 1, end):
+            dist = point_line_distance(points[i], points[start], points[end])
+            if dist > max_dist:
+                max_dist = dist
+                max_idx = i
+        
+        if max_dist > tolerance:
+            left = rdp(points, start, max_idx, tolerance)
+            right = rdp(points, max_idx, end, tolerance)
+            return left + [max_idx] + right
+        
+        return []
+    
+    keep_indices = [0] + rdp(vertices, 0, len(vertices) - 1, tolerance) + [len(vertices) - 1]
+    keep_indices = sorted(set(keep_indices))
+    
+    return [vertices[i] for i in keep_indices]
+
+
+def get_osm_feature_stats(features: Dict[str, List[Dict]]) -> Dict[str, int]:
+    """Get statistics about imported OSM features."""
+    return {ftype: len(polys) for ftype, polys in features.items() if polys}
+
+
+# ============================================================================
+# SAM AUTO-TRACE FUNCTIONS (from sam_autotrace.py)
+# ============================================================================
+
+@dataclass
+class TracedPolygon:
+    """Represents a traced polygon from SAM segmentation."""
+    vertices: List[Tuple[float, float]]
+    confidence: float
+    area: int
+    bbox: Tuple[int, int, int, int]
+
+
+def is_sam_available() -> bool:
+    """Check if SAM auto-trace feature is available."""
+    return _sam_available and _numpy_available and _cv2_available
+
+
+def get_sam_unavailable_message() -> str:
+    """Get a user-friendly message about missing SAM dependencies."""
+    if _sam_available and _numpy_available and _cv2_available:
+        return ""
+    
+    msg = "SAM Auto-Trace requires additional dependencies.\n\n"
+    msg += "To enable this feature, install:\n"
+    msg += "  pip install torch torchvision\n"
+    msg += "  pip install segment-anything\n"
+    msg += "  pip install opencv-python\n"
+    msg += "  pip install numpy pillow\n\n"
+    msg += "Then download the SAM model weights (~2.5GB):\n"
+    msg += "  https://github.com/facebookresearch/segment-anything\n\n"
+    
+    if _sam_error:
+        msg += f"Current error: {_sam_error}"
+    
+    return msg
+
+
+class SAMTracer:
+    """SAM-based auto-tracing for golf course features."""
+    
+    def __init__(self, checkpoint_path: Optional[str] = None, device: str = "auto"):
+        if not is_sam_available():
+            raise RuntimeError(get_sam_unavailable_message())
+        
+        self.checkpoint_path = checkpoint_path or SAM_CHECKPOINT_PATH
+        
+        if device == "auto":
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            self.device = device
+        
+        self.sam = None
+        self.predictor = None
+        self._image_set = False
+        self._current_image = None
+    
+    def load_model(self) -> bool:
+        if not os.path.exists(self.checkpoint_path):
+            return False
+        
+        try:
+            self.sam = sam_model_registry[SAM_MODEL_TYPE](checkpoint=self.checkpoint_path)
+            self.sam.to(device=self.device)
+            self.predictor = SamPredictor(self.sam)
+            return True
+        except Exception as e:
+            print(f"Failed to load SAM model: {e}")
+            return False
+    
+    def is_model_loaded(self) -> bool:
+        return self.predictor is not None
+    
+    def set_image(self, image: Any) -> bool:
+        if not self.is_model_loaded():
+            return False
+        
+        try:
+            if isinstance(image, str):
+                image = np.array(Image.open(image))
+            elif hasattr(image, 'convert'):
+                image = np.array(image.convert('RGB'))
+            
+            self._current_image = image
+            self.predictor.set_image(image)
+            self._image_set = True
+            return True
+        except Exception as e:
+            print(f"Failed to set image: {e}")
+            return False
+    
+    def segment_point(
+        self, 
+        point: Tuple[int, int],
+        point_label: int = 1
+    ) -> Optional[TracedPolygon]:
+        if not self._image_set:
+            return None
+        
+        try:
+            input_point = np.array([[point[0], point[1]]])
+            input_label = np.array([point_label])
+            
+            masks, scores, _ = self.predictor.predict(
+                point_coords=input_point,
+                point_labels=input_label,
+                multimask_output=True
+            )
+            
+            best_idx = np.argmax(scores)
+            mask = masks[best_idx]
+            score = float(scores[best_idx])
+            
+            polygon = mask_to_polygon(mask)
+            
+            if polygon is None:
+                return None
+            
+            return TracedPolygon(
+                vertices=polygon,
+                confidence=score,
+                area=int(np.sum(mask)),
+                bbox=get_mask_bbox(mask)
+            )
+        except Exception as e:
+            print(f"Segmentation failed: {e}")
+            return None
+    
+    def segment_box(
+        self, 
+        box: Tuple[int, int, int, int]
+    ) -> Optional[TracedPolygon]:
+        if not self._image_set:
+            return None
+        
+        try:
+            input_box = np.array([box])
+            
+            masks, scores, _ = self.predictor.predict(
+                box=input_box,
+                multimask_output=True
+            )
+            
+            best_idx = np.argmax(scores)
+            mask = masks[best_idx]
+            score = float(scores[best_idx])
+            
+            polygon = mask_to_polygon(mask)
+            
+            if polygon is None:
+                return None
+            
+            return TracedPolygon(
+                vertices=polygon,
+                confidence=score,
+                area=int(np.sum(mask)),
+                bbox=get_mask_bbox(mask)
+            )
+        except Exception as e:
+            print(f"Box segmentation failed: {e}")
+            return None
+    
+    def clear(self):
+        self._image_set = False
+        self._current_image = None
+
+
+def mask_to_polygon(
+    mask: 'np.ndarray', 
+    simplify_tolerance: float = 2.0
+) -> Optional[List[Tuple[float, float]]]:
+    """Convert a binary mask to a polygon outline."""
+    if not _cv2_available or not _numpy_available:
+        return None
+    
+    try:
+        mask_uint8 = (mask * 255).astype(np.uint8)
+        
+        contours, _ = cv2.findContours(
+            mask_uint8, 
+            cv2.RETR_EXTERNAL, 
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+        
+        if not contours:
+            return None
+        
+        largest = max(contours, key=cv2.contourArea)
+        
+        epsilon = simplify_tolerance
+        simplified = cv2.approxPolyDP(largest, epsilon, True)
+        
+        vertices = [(float(pt[0][0]), float(pt[0][1])) for pt in simplified]
+        
+        if len(vertices) < 3:
+            return None
+        
+        return vertices
+    except Exception as e:
+        print(f"Mask to polygon conversion failed: {e}")
+        return None
+
+
+def get_mask_bbox(mask: 'np.ndarray') -> Tuple[int, int, int, int]:
+    """Get bounding box of a mask."""
+    rows = np.any(mask, axis=1)
+    cols = np.any(mask, axis=0)
+    
+    if not np.any(rows) or not np.any(cols):
+        return (0, 0, 0, 0)
+    
+    y_min, y_max = np.where(rows)[0][[0, -1]]
+    x_min, x_max = np.where(cols)[0][[0, -1]]
+    
+    return (int(x_min), int(y_min), int(x_max - x_min), int(y_max - y_min))
+
+
+def pixels_to_geo(
+    pixel_coords: List[Tuple[float, float]],
+    image_bounds: Tuple[float, float, float, float],
+    image_size: Tuple[int, int]
+) -> List[Dict[str, float]]:
+    """Convert pixel coordinates to geographic coordinates."""
+    min_lat, max_lat, min_lon, max_lon = image_bounds
+    width, height = image_size
+    
+    lat_range = max_lat - min_lat
+    lon_range = max_lon - min_lon
+    
+    geo_coords = []
+    for x, y in pixel_coords:
+        norm_x = x / width
+        norm_y = y / height
+        
+        lon = min_lon + (norm_x * lon_range)
+        lat = max_lat - (norm_y * lat_range)
+        
+        geo_coords.append({"lat": lat, "lon": lon})
+    
+    return geo_coords
+
+
+def geo_to_pixels(
+    geo_coords: List[Dict[str, float]],
+    image_bounds: Tuple[float, float, float, float],
+    image_size: Tuple[int, int]
+) -> List[Tuple[int, int]]:
+    """Convert geographic coordinates to pixel coordinates."""
+    min_lat, max_lat, min_lon, max_lon = image_bounds
+    width, height = image_size
+    
+    lat_range = max_lat - min_lat
+    lon_range = max_lon - min_lon
+    
+    pixel_coords = []
+    for coord in geo_coords:
+        lat, lon = coord["lat"], coord["lon"]
+        
+        norm_x = (lon - min_lon) / lon_range
+        norm_y = (max_lat - lat) / lat_range
+        
+        x = int(norm_x * width)
+        y = int(norm_y * height)
+        
+        pixel_coords.append((x, y))
+    
+    return pixel_coords
+
+
+def simplify_polygon_rdp(
+    vertices: List[Tuple[float, float]], 
+    tolerance: float = 1.0
+) -> List[Tuple[float, float]]:
+    """Simplify polygon using Ramer-Douglas-Peucker algorithm (pure Python)."""
+    if len(vertices) <= 3:
+        return vertices
+    
+    def perpendicular_distance(point, line_start, line_end):
+        dx = line_end[0] - line_start[0]
+        dy = line_end[1] - line_start[1]
+        
+        if dx == 0 and dy == 0:
+            return ((point[0] - line_start[0])**2 + (point[1] - line_start[1])**2)**0.5
+        
+        t = max(0, min(1, 
+            ((point[0] - line_start[0]) * dx + (point[1] - line_start[1]) * dy) / 
+            (dx * dx + dy * dy)))
+        
+        proj_x = line_start[0] + t * dx
+        proj_y = line_start[1] + t * dy
+        
+        return ((point[0] - proj_x)**2 + (point[1] - proj_y)**2)**0.5
+    
+    def rdp_recursive(points, start, end):
+        if end - start < 2:
+            return []
+        
+        max_dist = 0
+        max_idx = start
+        
+        for i in range(start + 1, end):
+            dist = perpendicular_distance(points[i], points[start], points[end])
+            if dist > max_dist:
+                max_dist = dist
+                max_idx = i
+        
+        if max_dist > tolerance:
+            left = rdp_recursive(points, start, max_idx)
+            right = rdp_recursive(points, max_idx, end)
+            return left + [max_idx] + right
+        
+        return []
+    
+    keep_indices = [0] + rdp_recursive(vertices, 0, len(vertices) - 1) + [len(vertices) - 1]
+    keep_indices = sorted(set(keep_indices))
+    
+    return [vertices[i] for i in keep_indices]
+
+
+def extract_map_tile_image(
+    map_widget: Any,
+    bounds: Optional[Tuple[float, float, float, float]] = None
+) -> Optional[Tuple[Any, Tuple[float, float, float, float], Tuple[int, int]]]:
+    """Extract the current visible map tile as an image."""
+    try:
+        from PIL import ImageGrab
+        
+        x = map_widget.winfo_rootx()
+        y = map_widget.winfo_rooty()
+        width = map_widget.winfo_width()
+        height = map_widget.winfo_height()
+        
+        image = ImageGrab.grab(bbox=(x, y, x + width, y + height))
+        
+        if bounds is None:
+            try:
+                pos = map_widget.get_position()
+                zoom = map_widget.zoom
+                
+                deg_per_pixel = 360 / (256 * (2 ** zoom))
+                
+                half_w = (width / 2) * deg_per_pixel
+                half_h = (height / 2) * deg_per_pixel
+                
+                center_lat, center_lon = pos
+                bounds = (
+                    center_lat - half_h,
+                    center_lat + half_h,
+                    center_lon - half_w,
+                    center_lon + half_w
+                )
+            except:
+                return None
+        
+        return (image, bounds, (width, height))
+    except Exception as e:
+        print(f"Map tile extraction failed: {e}")
+        return None
+
+
+# Singleton tracer instance (lazily initialized)
+_global_tracer = None
+
+
+def get_tracer(checkpoint_path: Optional[str] = None) -> Optional[SAMTracer]:
+    """Get or create the global SAM tracer instance."""
+    global _global_tracer
+    
+    if not is_sam_available():
+        return None
+    
+    if _global_tracer is None:
+        _global_tracer = SAMTracer(checkpoint_path)
+        if not _global_tracer.load_model():
+            _global_tracer = None
+    
+    return _global_tracer
+
+
+# ============================================================================
+# PDF RULEBOOK CLASS
+# ============================================================================
 
 class PDFRulebook:
     """

@@ -1,11 +1,20 @@
 from datetime import datetime, date
 
-from Backend.Backend import GolfBackend, save_json, ROUNDS_FILE, generate_scorecard_data
-
-from Yardbook.yardbook_integration import yardbookIntegration
+# Import from consolidated Backend module
+from Backend import (
+    GolfBackend, save_json, COURSES_FILE, ROUNDS_FILE, generate_scorecard_data,
+    yardbookManager, GeoPoint, Target, Hazard, Polygon, HoleMapFeatures,
+    DISTANCE_RING_PRESETS, POLYGON_STYLES, MARKER_STYLES,
+    haversine_distance, bearing, destination_point, generate_distance_ring,
+    midpoint, calculate_hole_distances, validate_yardage_difference,
+    is_osm_available, import_osm_features, get_osm_feature_stats,
+    is_sam_available, get_sam_unavailable_message, get_tracer,
+    TracedPolygon, SAMTracer, pixels_to_geo, geo_to_pixels
+)
 
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+from typing import Dict, List, Optional, Callable, Any, Tuple
 
 from tkcalendar import DateEntry
 
@@ -19,12 +28,1131 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
-# Import new modules
-from ui_layout import autosize_toplevel, ScrollableFrame, CollapsibleSection
-from hole_plan_ui import open_hole_plan
 
-# Courses file path (must match Backend.py)
-COURSES_FILE = 'Data/courses.json'
+# ============================================================================
+# UI LAYOUT UTILITIES (from ui_layout.py)
+# ============================================================================
+
+def get_screen_size(window: tk.Misc) -> Tuple[int, int]:
+    """Get the screen dimensions."""
+    return window.winfo_screenwidth(), window.winfo_screenheight()
+
+
+def autosize_toplevel(
+    win: tk.Toplevel,
+    pad: Tuple[int, int] = (40, 40),
+    min_size: Tuple[int, int] = (300, 200),
+    max_ratio: float = 0.9,
+    center: bool = True
+) -> None:
+    """Auto-size a Toplevel window to fit its content within reasonable bounds."""
+    win.update_idletasks()
+    
+    req_width = win.winfo_reqwidth()
+    req_height = win.winfo_reqheight()
+    
+    width = req_width + pad[0]
+    height = req_height + pad[1]
+    
+    screen_w, screen_h = get_screen_size(win)
+    
+    max_width = int(screen_w * max_ratio)
+    max_height = int(screen_h * max_ratio)
+    
+    width = max(min_size[0], min(width, max_width))
+    height = max(min_size[1], min(height, max_height))
+    
+    if center:
+        x = (screen_w - width) // 2
+        y = (screen_h - height) // 2
+        win.geometry(f"{width}x{height}+{x}+{y}")
+    else:
+        win.geometry(f"{width}x{height}")
+    
+    win.minsize(min_size[0], min_size[1])
+
+
+def autosize_root(
+    root: tk.Tk,
+    pad: Tuple[int, int] = (40, 40),
+    min_size: Tuple[int, int] = (400, 500),
+    max_ratio: float = 0.85,
+    center: bool = True
+) -> None:
+    """Auto-size the root window to fit its content."""
+    autosize_toplevel(root, pad, min_size, max_ratio, center)
+
+
+def configure_dialog(
+    win: tk.Toplevel,
+    parent: tk.Misc,
+    title: str,
+    modal: bool = True,
+    min_size: Optional[Tuple[int, int]] = None
+) -> None:
+    """Configure a dialog window with standard settings."""
+    win.title(title)
+    win.transient(parent)
+    
+    if modal:
+        win.grab_set()
+    
+    if min_size:
+        win.minsize(min_size[0], min_size[1])
+    
+    win.update_idletasks()
+    
+    parent_x = parent.winfo_rootx()
+    parent_y = parent.winfo_rooty()
+    parent_w = parent.winfo_width()
+    parent_h = parent.winfo_height()
+    
+    win_w = win.winfo_reqwidth()
+    win_h = win.winfo_reqheight()
+    
+    x = parent_x + (parent_w - win_w) // 2
+    y = parent_y + (parent_h - win_h) // 2
+    
+    screen_w, screen_h = get_screen_size(win)
+    x = max(0, min(x, screen_w - win_w))
+    y = max(0, min(y, screen_h - win_h))
+    
+    win.geometry(f"+{x}+{y}")
+
+
+class ScrollableFrame(ttk.Frame):
+    """A frame that supports scrolling when content exceeds bounds."""
+    
+    def __init__(self, parent, max_height: int = 500, **kwargs):
+        super().__init__(parent, **kwargs)
+        
+        self.max_height = max_height
+        
+        self.canvas = tk.Canvas(self, highlightthickness=0)
+        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        
+        self.inner_frame = ttk.Frame(self.canvas)
+        
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        
+        self.canvas_window = self.canvas.create_window(
+            (0, 0), 
+            window=self.inner_frame, 
+            anchor="nw"
+        )
+        
+        self.scrollbar.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+        
+        self.inner_frame.bind("<Configure>", self._on_frame_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        
+        self.canvas.bind("<Enter>", self._bind_mousewheel)
+        self.canvas.bind("<Leave>", self._unbind_mousewheel)
+    
+    def _on_frame_configure(self, event):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        
+        content_height = self.inner_frame.winfo_reqheight()
+        if content_height <= self.max_height:
+            self.canvas.configure(height=content_height)
+            self.scrollbar.pack_forget()
+        else:
+            self.canvas.configure(height=self.max_height)
+            self.scrollbar.pack(side="right", fill="y")
+    
+    def _on_canvas_configure(self, event):
+        self.canvas.itemconfig(self.canvas_window, width=event.width)
+    
+    def _bind_mousewheel(self, event):
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-4>", self._on_mousewheel_linux)
+        self.canvas.bind_all("<Button-5>", self._on_mousewheel_linux)
+    
+    def _unbind_mousewheel(self, event):
+        self.canvas.unbind_all("<MouseWheel>")
+        self.canvas.unbind_all("<Button-4>")
+        self.canvas.unbind_all("<Button-5>")
+    
+    def _on_mousewheel(self, event):
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+    
+    def _on_mousewheel_linux(self, event):
+        if event.num == 4:
+            self.canvas.yview_scroll(-1, "units")
+        elif event.num == 5:
+            self.canvas.yview_scroll(1, "units")
+
+
+class CollapsibleSection(ttk.Frame):
+    """A collapsible section widget with toggle button."""
+    
+    def __init__(
+        self, 
+        parent, 
+        title: str, 
+        expanded: bool = False,
+        header_style: str = "Header.TLabel",
+        **kwargs
+    ):
+        super().__init__(parent, **kwargs)
+        
+        self.title = title
+        self._expanded = expanded
+        
+        self.header_frame = ttk.Frame(self)
+        self.header_frame.pack(fill="x")
+        
+        self.toggle_var = tk.StringVar(value="▼" if expanded else "▶")
+        self.toggle_btn = ttk.Button(
+            self.header_frame,
+            textvariable=self.toggle_var,
+            width=3,
+            command=self.toggle
+        )
+        self.toggle_btn.pack(side="left", padx=(0, 5))
+        
+        self.title_label = ttk.Label(
+            self.header_frame,
+            text=title,
+            style=header_style,
+            cursor="hand2"
+        )
+        self.title_label.pack(side="left", fill="x", expand=True)
+        self.title_label.bind("<Button-1>", lambda e: self.toggle())
+        
+        self.content_frame = ttk.Frame(self)
+        if expanded:
+            self.content_frame.pack(fill="both", expand=True, pady=(5, 0))
+    
+    @property
+    def content(self) -> ttk.Frame:
+        return self.content_frame
+    
+    @property
+    def is_expanded(self) -> bool:
+        return self._expanded
+    
+    def toggle(self):
+        self._expanded = not self._expanded
+        
+        if self._expanded:
+            self.toggle_var.set("▼")
+            self.content_frame.pack(fill="both", expand=True, pady=(5, 0))
+        else:
+            self.toggle_var.set("▶")
+            self.content_frame.pack_forget()
+    
+    def expand(self):
+        if not self._expanded:
+            self.toggle()
+    
+    def collapse(self):
+        if self._expanded:
+            self.toggle()
+
+
+def create_labeled_entry(
+    parent: ttk.Frame,
+    label_text: str,
+    row: int,
+    column: int = 0,
+    width: int = 25,
+    default_value: str = ""
+) -> ttk.Entry:
+    """Create a label + entry widget pair in a grid."""
+    ttk.Label(parent, text=label_text).grid(row=row, column=column, sticky="e", padx=5, pady=3)
+    entry = ttk.Entry(parent, width=width)
+    entry.grid(row=row, column=column + 1, sticky="w", padx=5, pady=3)
+    if default_value:
+        entry.insert(0, default_value)
+    return entry
+
+
+def create_button_row(
+    parent: ttk.Frame,
+    buttons: list,
+    pack_side: str = "right",
+    padx: int = 5,
+    pady: int = 10
+) -> ttk.Frame:
+    """Create a row of buttons."""
+    btn_frame = ttk.Frame(parent)
+    btn_frame.pack(fill="x", pady=pady)
+    
+    for text, command in buttons:
+        ttk.Button(btn_frame, text=text, command=command).pack(
+            side=pack_side, padx=padx
+        )
+    
+    return btn_frame
+
+
+# ============================================================================
+# YARDBOOK INTEGRATION (from yardbook_integration.py)
+# ============================================================================
+
+def _check_map_available():
+    """Check if tkintermapview is available at runtime."""
+    try:
+        import tkintermapview
+        return True, tkintermapview
+    except ImportError:
+        return False, None
+
+_map_available, tkintermapview = _check_map_available()
+
+
+def is_map_available():
+    """Public function to check map availability."""
+    return _map_available
+
+
+def open_yardbook(
+    parent: tk.Tk,
+    course_data: Dict,
+    hole_num: int,
+    courses_file: str,
+    on_save_callback: Optional[Callable] = None,
+    selected_tee: Optional[str] = None,
+    club_distances: Optional[Dict] = None
+):
+    """
+    Open the yardbook view for a specific hole.
+    Dynamically imports yardbook_ui to avoid import errors when tkintermapview is not installed.
+    """
+    if not _map_available:
+        messagebox.showerror(
+            "Feature Unavailable",
+            "The yardbook feature requires tkintermapview.\n\n"
+            "Install with: pip install tkintermapview"
+        )
+        return None
+    
+    try:
+        from yardbook_ui import yardbookView
+        return yardbookView(
+            parent=parent,
+            course_data=course_data,
+            hole_num=hole_num,
+            courses_file=courses_file,
+            on_save_callback=on_save_callback,
+            selected_tee=selected_tee,
+            club_distances=club_distances
+        )
+    except ImportError as e:
+        messagebox.showerror("Error", f"Could not load yardbook: {e}")
+        return None
+
+
+class yardbookIntegration:
+    """
+    Integration layer between the Golf App and yardbook feature.
+    Handles course/hole selection and yardbook launch.
+    """
+    
+    def __init__(self, backend: Any, courses_file: str):
+        """
+        Initialize the integration.
+        
+        Args:
+            backend: GolfBackend instance
+            courses_file: Path to courses.json
+        """
+        self.backend = backend
+        self.courses_file = courses_file
+        
+        self.manager = yardbookManager(courses_file)
+        
+        self.active_yardbook = None
+    
+    def is_available(self) -> bool:
+        """Check if yardbook feature is available."""
+        return is_map_available()
+    
+    def _get_user_club_distances(self) -> List[Dict]:
+        """
+        Get the user's club distances from the backend.
+        
+        Returns:
+            List of club dictionaries with name and distance
+        """
+        try:
+            clubs = self.backend.get_clubs()
+            if clubs:
+                return clubs
+        except Exception as e:
+            print(f"Warning: Could not load user club distances: {e}")
+        return []
+    
+    def show_course_selector(self, parent: tk.Tk):
+        """
+        Show the course/hole selector dialog.
+        
+        Args:
+            parent: Parent Tkinter window
+        """
+        if not self.is_available():
+            messagebox.showerror(
+                "Feature Unavailable",
+                "The yardbook feature requires additional dependencies.\n\n"
+                "Please install:\n"
+                "  pip install tkintermapview\n\n"
+                "Then restart the application."
+            )
+            return
+        
+        selector = CourseHoleSelector(
+            parent=parent,
+            backend=self.backend,
+            manager=self.manager,
+            on_select=lambda course, hole: self._launch_yardbook(parent, course, hole)
+        )
+    
+    def _launch_yardbook(self, parent: tk.Tk, course_data: Dict, hole_num: int):
+        """Launch the yardbook view for a specific hole."""
+        # Close existing yardbook if open
+        if self.active_yardbook:
+            try:
+                self.active_yardbook.window.destroy()
+            except:
+                pass
+        
+        # Get the user's club distances
+        club_distances = self._get_user_club_distances()
+        
+        self.active_yardbook = open_yardbook(
+            parent=parent,
+            course_data=course_data,
+            hole_num=hole_num,
+            courses_file=self.courses_file,
+            on_save_callback=lambda: self._on_yardbook_save(course_data["name"]),
+            club_distances=club_distances
+        )
+    
+    def _on_yardbook_save(self, course_name: str):
+        """Callback when yardbook data is saved."""
+        # Invalidate any caches
+        if self.manager:
+            self.manager.invalidate_cache(course_name)
+    
+    def open_hole_direct(self, parent: tk.Tk, course_name: str, hole_num: int):
+        """
+        Open yardbook directly for a specific course and hole.
+        Useful for integration from scorecard view.
+        
+        Args:
+            parent: Parent window
+            course_name: Name of the course
+            hole_num: Hole number (1-18)
+        """
+        if not self.is_available():
+            messagebox.showerror("Feature Unavailable", "yardbook feature is not available.")
+            return
+        
+        course_data = self.backend.get_course_by_name(course_name)
+        if not course_data:
+            messagebox.showerror("Error", f"Course '{course_name}' not found.")
+            return
+        
+        self._launch_yardbook(parent, course_data, hole_num)
+    
+    def get_hole_distances(self, course_name: str, hole_num: int) -> Optional[Dict]:
+        """
+        Get calculated distances for a hole (for display in other parts of the app).
+        
+        Args:
+            course_name: Course name
+            hole_num: Hole number
+        
+        Returns:
+            Dictionary of distances or None if no yardbook data
+        """
+        if not self.manager:
+            return None
+        
+        features = self.manager.get_hole_features(course_name, hole_num)
+        if not features.has_data():
+            return None
+        
+        map_features_dict = {
+            "tee": features.tee.to_dict(),
+            "green_front": features.green_front.to_dict(),
+            "green_back": features.green_back.to_dict(),
+            "targets": [t.to_dict() for t in features.targets],
+            "hazards": [h.to_dict() for h in features.hazards]
+        }
+        
+        return calculate_hole_distances(map_features_dict)
+    
+    def has_yardbook_data(self, course_name: str) -> bool:
+        """Check if a course has any yardbook data."""
+        if not self.manager:
+            return False
+        
+        summary = self.manager.get_course_yardbook_summary(course_name)
+        return summary.get("holes_with_data", 0) > 0
+
+
+class CourseHoleSelector:
+    """
+    Dialog for selecting a course and hole to view in the yardbook.
+    """
+    
+    def __init__(
+        self,
+        parent: tk.Tk,
+        backend: Any,
+        manager: yardbookManager,
+        on_select: Callable[[Dict, int], None]
+    ):
+        self.parent = parent
+        self.backend = backend
+        self.manager = manager
+        self.on_select = on_select
+        
+        self.window = tk.Toplevel(parent)
+        self.window.title("Open yardbook")
+        self.window.geometry("500x450")
+        self.window.transient(parent)
+        self.window.grab_set()
+        
+        self._create_ui()
+        self._populate_courses()
+    
+    def _create_ui(self):
+        """Create the selector UI."""
+        main_frame = ttk.Frame(self.window, padding=15)
+        main_frame.pack(fill='both', expand=True)
+        
+        # Title
+        ttk.Label(
+            main_frame, 
+            text="📍 Open yardbook",
+            font=("Helvetica", 16, "bold")
+        ).pack(pady=(0, 15))
+        
+        # Course selection
+        course_frame = ttk.LabelFrame(main_frame, text="Select Course", padding=10)
+        course_frame.pack(fill='x', pady=(0, 10))
+        
+        self.course_var = tk.StringVar()
+        self.course_combo = ttk.Combobox(
+            course_frame,
+            textvariable=self.course_var,
+            state='readonly',
+            width=50
+        )
+        self.course_combo.pack(fill='x')
+        self.course_combo.bind('<<ComboboxSelected>>', self._on_course_selected)
+        
+        # Course info
+        self.course_info_label = ttk.Label(
+            course_frame,
+            text="",
+            font=("Helvetica", 9),
+            foreground="gray"
+        )
+        self.course_info_label.pack(anchor='w', pady=(5, 0))
+        
+        # Hole selection
+        hole_frame = ttk.LabelFrame(main_frame, text="Select Hole", padding=10)
+        hole_frame.pack(fill='both', expand=True, pady=(0, 10))
+        
+        # Hole grid
+        self.hole_grid_frame = ttk.Frame(hole_frame)
+        self.hole_grid_frame.pack(fill='both', expand=True)
+        
+        self.hole_buttons: Dict[int, ttk.Button] = {}
+        self.selected_hole = tk.IntVar(value=1)
+        
+        # Create 18 hole buttons in a grid
+        for i in range(18):
+            hole_num = i + 1
+            row = i // 9
+            col = i % 9
+            
+            btn = ttk.Button(
+                self.hole_grid_frame,
+                text=str(hole_num),
+                width=4,
+                command=lambda h=hole_num: self._select_hole(h)
+            )
+            btn.grid(row=row, column=col, padx=2, pady=2)
+            self.hole_buttons[hole_num] = btn
+        
+        # Row labels
+        ttk.Label(self.hole_grid_frame, text="Front 9", font=("Helvetica", 9)).grid(row=0, column=9, padx=5)
+        ttk.Label(self.hole_grid_frame, text="Back 9", font=("Helvetica", 9)).grid(row=1, column=9, padx=5)
+        
+        # Hole info
+        self.hole_info_label = ttk.Label(
+            hole_frame,
+            text="Select a hole",
+            font=("Helvetica", 10)
+        )
+        self.hole_info_label.pack(pady=10)
+        
+        # Buttons
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill='x')
+        
+        ttk.Button(
+            btn_frame,
+            text="Open yardbook",
+            command=self._open_yardbook
+        ).pack(side='right', padx=5)
+        
+        ttk.Button(
+            btn_frame,
+            text="Cancel",
+            command=self.window.destroy
+        ).pack(side='right', padx=5)
+    
+    def _populate_courses(self):
+        """Populate the course dropdown."""
+        courses = self.backend.get_courses()
+        course_names = [c["name"] for c in sorted(courses, key=lambda x: (x.get("club", ""), x["name"]))]
+        
+        self.course_combo['values'] = course_names
+        
+        if course_names:
+            self.course_combo.set(course_names[0])
+            self._on_course_selected()
+    
+    def _on_course_selected(self, event=None):
+        """Handle course selection change."""
+        course_name = self.course_var.get()
+        course = self.backend.get_course_by_name(course_name)
+        
+        if not course:
+            return
+        
+        # Update course info
+        num_holes = len(course.get("pars", []))
+        total_par = sum(course.get("pars", []))
+        
+        # Get yardbook completion
+        summary = self.manager.get_course_yardbook_summary(course_name)
+        completion = summary.get("completion_percent", 0)
+        holes_complete = summary.get("holes_complete", 0)
+        
+        info_text = f"{course.get('club', '')} • {num_holes} holes • Par {total_par}"
+        if holes_complete > 0:
+            info_text += f" • yardbook: {holes_complete}/{num_holes} holes ({completion}%)"
+        else:
+            info_text += " • No yardbook data yet"
+        
+        self.course_info_label.config(text=info_text)
+        
+        # Update hole button states
+        self._update_hole_buttons(course)
+    
+    def _update_hole_buttons(self, course: Dict):
+        """Update hole button appearances based on data status."""
+        course_name = course["name"]
+        pars = course.get("pars", [])
+        
+        for hole_num, btn in self.hole_buttons.items():
+            # Disable buttons beyond course hole count
+            if hole_num > len(pars):
+                btn.config(state='disabled')
+                continue
+            
+            btn.config(state='normal')
+            
+            # Check if hole has yardbook data
+            features = self.manager.get_hole_features(course_name, hole_num)
+            if features.has_data():
+                # Has data - use different style
+                btn.config(text=f"✓{hole_num}")
+            else:
+                btn.config(text=str(hole_num))
+    
+    def _select_hole(self, hole_num: int):
+        """Handle hole button click."""
+        self.selected_hole.set(hole_num)
+        
+        # Update info label
+        course_name = self.course_var.get()
+        course = self.backend.get_course_by_name(course_name)
+        
+        if course:
+            pars = course.get("pars", [])
+            if hole_num <= len(pars):
+                par = pars[hole_num - 1]
+                
+                # Get yardage
+                yardages = course.get("yardages", {})
+                yardage_str = ""
+                for tee, yards in yardages.items():
+                    if hole_num <= len(yards):
+                        yardage_str = f" • {yards[hole_num - 1]} yds ({tee})"
+                        break
+                
+                # Check yardbook status
+                features = self.manager.get_hole_features(course_name, hole_num)
+                status = "✓ Has yardbook data" if features.has_data() else "No yardbook data"
+                
+                self.hole_info_label.config(
+                    text=f"Hole {hole_num} • Par {par}{yardage_str} • {status}"
+                )
+        
+        # Highlight selected button
+        for h, btn in self.hole_buttons.items():
+            if h == hole_num:
+                btn.state(['pressed'])
+            else:
+                btn.state(['!pressed'])
+    
+    def _open_yardbook(self):
+        """Open the yardbook for selected course and hole."""
+        course_name = self.course_var.get()
+        hole_num = self.selected_hole.get()
+        
+        if not course_name:
+            messagebox.showwarning("Warning", "Please select a course.")
+            return
+        
+        course = self.backend.get_course_by_name(course_name)
+        if not course:
+            messagebox.showerror("Error", "Course not found.")
+            return
+        
+        # Close selector
+        self.window.destroy()
+        
+        # Open yardbook
+        self.on_select(course, hole_num)
+
+
+# === Utility Functions for Frontend Integration ===
+
+def add_yardbook_to_scorecard(
+    parent_frame: ttk.Frame,
+    course_name: str,
+    hole_num: int,
+    yardbook_integration: yardbookIntegration,
+    parent_window: tk.Tk
+):
+    """
+    Add a yardbook button to a scorecard hole display.
+    
+    Args:
+        parent_frame: Frame to add button to
+        course_name: Course name
+        hole_num: Hole number
+        yardbook_integration: yardbookIntegration instance
+        parent_window: Main app window
+    """
+    if not yardbook_integration.is_available():
+        return
+    
+    btn = ttk.Button(
+        parent_frame,
+        text="📍",
+        width=3,
+        command=lambda: yardbook_integration.open_hole_direct(
+            parent_window, course_name, hole_num
+        )
+    )
+    btn.pack(side='right', padx=2)
+
+
+def create_distance_display_widget(
+    parent: ttk.Frame,
+    yardbook_integration: yardbookIntegration,
+    course_name: str,
+    hole_num: int
+) -> Optional[ttk.Frame]:
+    """
+    Create a widget showing yardbook distances for a hole.
+    Returns None if no yardbook data exists.
+    
+    Args:
+        parent: Parent frame
+        yardbook_integration: yardbookIntegration instance
+        course_name: Course name
+        hole_num: Hole number
+    
+    Returns:
+        Frame widget with distance info or None
+    """
+    distances = yardbook_integration.get_hole_distances(course_name, hole_num)
+    
+    if not distances:
+        return None
+    
+    frame = ttk.Frame(parent)
+    
+    if distances.get("tee_to_green_center"):
+        ttk.Label(
+            frame,
+            text=f"📍 {distances['tee_to_green_center']:.0f}y",
+            font=("Helvetica", 9)
+        ).pack(side='left', padx=2)
+    
+    # Show targets if any
+    for target in distances.get("targets", [])[:2]:  # Max 2 targets
+        ttk.Label(
+            frame,
+            text=f"• {target['name']}: {target['from_tee']:.0f}y",
+            font=("Helvetica", 8),
+            foreground="gray"
+        ).pack(side='left', padx=2)
+    
+    return frame
+
+
+# ============================================================================
+# HOLE PLAN WINDOW (from hole_plan.py)
+# ============================================================================
+
+# Default clubs for users without club data configured
+DEFAULT_CLUBS = [
+    {"name": "Driver", "distance": 250},
+    {"name": "3 Wood", "distance": 230},
+    {"name": "5 Wood", "distance": 210},
+    {"name": "4 Hybrid", "distance": 195},
+    {"name": "5 Iron", "distance": 180},
+    {"name": "6 Iron", "distance": 170},
+    {"name": "7 Iron", "distance": 160},
+    {"name": "8 Iron", "distance": 150},
+    {"name": "9 Iron", "distance": 140},
+    {"name": "PW", "distance": 130},
+    {"name": "GW", "distance": 115},
+    {"name": "SW", "distance": 100},
+    {"name": "LW", "distance": 80},
+]
+
+
+class HolePlanWindow:
+    """
+    Strategy planning window for an individual hole.
+    Displays hole info and lets user plan their shots.
+    """
+    
+    def __init__(
+        self,
+        parent: tk.Tk,
+        course_data: Dict,
+        hole_num: int,
+        clubs: List[Dict],
+        yardbook_integration: Optional[Any] = None
+    ):
+        self.parent = parent
+        self.course_data = course_data
+        self.hole_num = hole_num
+        self.clubs = clubs if clubs else DEFAULT_CLUBS
+        self.yardbook = yardbook_integration
+        
+        # Get hole info
+        pars = course_data.get("pars", [])
+        self.hole_par = pars[hole_num - 1] if hole_num <= len(pars) else 4
+        
+        # Get yardage from first available tee
+        yardages = course_data.get("yardages", {})
+        self.hole_yardage = 0
+        self.selected_tee = None
+        for tee, yards in yardages.items():
+            if hole_num <= len(yards):
+                self.hole_yardage = yards[hole_num - 1]
+                self.selected_tee = tee
+                break
+        
+        # Shot plan
+        self.shot_plan: List[Dict] = []
+        
+        # Build UI
+        self._create_window()
+    
+    def _create_window(self):
+        """Create the planning window."""
+        self.window = tk.Toplevel(self.parent)
+        self.window.title(f"Hole {self.hole_num} Plan - {self.course_data.get('name', 'Course')}")
+        self.window.geometry("600x500")
+        self.window.transient(self.parent)
+        
+        main_frame = ttk.Frame(self.window, padding=15)
+        main_frame.pack(fill='both', expand=True)
+        
+        # Header
+        header = ttk.Frame(main_frame)
+        header.pack(fill='x', pady=(0, 15))
+        
+        ttk.Label(
+            header,
+            text=f"Hole {self.hole_num}",
+            font=("Helvetica", 18, "bold")
+        ).pack(side='left')
+        
+        info_text = f"Par {self.hole_par}"
+        if self.hole_yardage:
+            info_text += f" • {self.hole_yardage} yards"
+            if self.selected_tee:
+                info_text += f" ({self.selected_tee})"
+        
+        ttk.Label(
+            header,
+            text=info_text,
+            font=("Helvetica", 12)
+        ).pack(side='left', padx=20)
+        
+        # Shot planning area
+        plan_frame = ttk.LabelFrame(main_frame, text="Shot Plan", padding=10)
+        plan_frame.pack(fill='both', expand=True, pady=(0, 10))
+        
+        # Remaining distance display
+        self.remaining_var = tk.StringVar(value=f"Remaining: {self.hole_yardage} yards")
+        ttk.Label(
+            plan_frame,
+            textvariable=self.remaining_var,
+            font=("Helvetica", 12, "bold")
+        ).pack(anchor='w', pady=(0, 10))
+        
+        # Shot list
+        self.shots_frame = ttk.Frame(plan_frame)
+        self.shots_frame.pack(fill='both', expand=True)
+        
+        # Add shot button
+        add_frame = ttk.Frame(plan_frame)
+        add_frame.pack(fill='x', pady=10)
+        
+        ttk.Label(add_frame, text="Add shot:").pack(side='left')
+        
+        self.club_var = tk.StringVar()
+        club_combo = ttk.Combobox(
+            add_frame,
+            textvariable=self.club_var,
+            values=[f"{c['name']} ({c['distance']}y)" for c in self.clubs],
+            state='readonly',
+            width=20
+        )
+        club_combo.pack(side='left', padx=5)
+        if self.clubs:
+            club_combo.set(f"{self.clubs[0]['name']} ({self.clubs[0]['distance']}y)")
+        
+        ttk.Button(
+            add_frame,
+            text="+ Add Shot",
+            command=self._add_shot
+        ).pack(side='left', padx=5)
+        
+        ttk.Button(
+            add_frame,
+            text="Clear All",
+            command=self._clear_shots
+        ).pack(side='left', padx=5)
+        
+        # Strategy notes
+        notes_frame = ttk.LabelFrame(main_frame, text="Strategy Notes", padding=10)
+        notes_frame.pack(fill='x', pady=(0, 10))
+        
+        self.notes_text = tk.Text(notes_frame, height=3, wrap='word')
+        self.notes_text.pack(fill='x')
+        
+        # Buttons
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill='x')
+        
+        if self.yardbook and self.yardbook.is_available():
+            ttk.Button(
+                btn_frame,
+                text="📍 Open Yardbook",
+                command=self._open_yardbook
+            ).pack(side='left')
+        
+        ttk.Button(
+            btn_frame,
+            text="Close",
+            command=self.window.destroy
+        ).pack(side='right')
+    
+    def _add_shot(self):
+        """Add a shot to the plan."""
+        selection = self.club_var.get()
+        if not selection:
+            return
+        
+        # Parse club selection
+        for club in self.clubs:
+            if f"{club['name']} ({club['distance']}y)" == selection:
+                shot = {
+                    "club": club["name"],
+                    "distance": club["distance"],
+                    "shot_num": len(self.shot_plan) + 1
+                }
+                self.shot_plan.append(shot)
+                self._update_shots_display()
+                break
+    
+    def _remove_shot(self, index: int):
+        """Remove a shot from the plan."""
+        if 0 <= index < len(self.shot_plan):
+            self.shot_plan.pop(index)
+            # Renumber shots
+            for i, shot in enumerate(self.shot_plan):
+                shot["shot_num"] = i + 1
+            self._update_shots_display()
+    
+    def _clear_shots(self):
+        """Clear all shots."""
+        self.shot_plan = []
+        self._update_shots_display()
+    
+    def _update_shots_display(self):
+        """Update the shots display."""
+        # Clear existing
+        for widget in self.shots_frame.winfo_children():
+            widget.destroy()
+        
+        # Calculate remaining
+        total_distance = sum(s["distance"] for s in self.shot_plan)
+        remaining = self.hole_yardage - total_distance
+        
+        self.remaining_var.set(f"Remaining: {remaining} yards")
+        
+        # Display shots
+        for i, shot in enumerate(self.shot_plan):
+            shot_frame = ttk.Frame(self.shots_frame)
+            shot_frame.pack(fill='x', pady=2)
+            
+            ttk.Label(
+                shot_frame,
+                text=f"Shot {shot['shot_num']}: {shot['club']} → {shot['distance']} yards",
+                font=("Helvetica", 10)
+            ).pack(side='left')
+            
+            ttk.Button(
+                shot_frame,
+                text="✕",
+                width=3,
+                command=lambda idx=i: self._remove_shot(idx)
+            ).pack(side='right')
+        
+        # Summary
+        if self.shot_plan:
+            ttk.Separator(self.shots_frame, orient='horizontal').pack(fill='x', pady=5)
+            
+            summary_text = f"Total: {len(self.shot_plan)} shots, {total_distance} yards"
+            if remaining > 0:
+                summary_text += f" (need {remaining} more)"
+            elif remaining < 0:
+                summary_text += f" ({abs(remaining)} past green)"
+            else:
+                summary_text += " (on green!)"
+            
+            ttk.Label(
+                self.shots_frame,
+                text=summary_text,
+                font=("Helvetica", 10, "italic")
+            ).pack(anchor='w')
+    
+    def _open_yardbook(self):
+        """Open yardbook for this hole."""
+        if self.yardbook:
+            self.yardbook.open_hole_direct(
+                self.parent,
+                self.course_data.get("name", ""),
+                self.hole_num
+            )
+
+
+def open_hole_plan(
+    parent: tk.Tk,
+    backend: Any,
+    courses_file: str,
+    yardbook_integration: Optional[Any] = None
+):
+    """
+    Open the hole plan selector/launcher.
+    Shows a course and hole selector, then opens the planning window.
+    """
+    # Create selector dialog
+    selector_win = tk.Toplevel(parent)
+    selector_win.title("Select Hole to Plan")
+    selector_win.geometry("400x300")
+    selector_win.transient(parent)
+    selector_win.grab_set()
+    
+    main_frame = ttk.Frame(selector_win, padding=15)
+    main_frame.pack(fill='both', expand=True)
+    
+    ttk.Label(
+        main_frame,
+        text="📝 Hole Plan",
+        font=("Helvetica", 16, "bold")
+    ).pack(pady=(0, 15))
+    
+    # Course selection
+    ttk.Label(main_frame, text="Course:").pack(anchor='w')
+    course_var = tk.StringVar()
+    courses = backend.get_courses()
+    course_names = [c["name"] for c in courses]
+    course_combo = ttk.Combobox(
+        main_frame,
+        textvariable=course_var,
+        values=course_names,
+        state='readonly',
+        width=40
+    )
+    course_combo.pack(fill='x', pady=(0, 10))
+    if course_names:
+        course_combo.set(course_names[0])
+    
+    # Hole selection
+    ttk.Label(main_frame, text="Hole:").pack(anchor='w')
+    hole_var = tk.IntVar(value=1)
+    hole_spin = ttk.Spinbox(
+        main_frame,
+        from_=1,
+        to=18,
+        textvariable=hole_var,
+        width=10
+    )
+    hole_spin.pack(anchor='w', pady=(0, 15))
+    
+    def open_plan():
+        course_name = course_var.get()
+        hole_num = hole_var.get()
+        
+        if not course_name:
+            messagebox.showwarning("Warning", "Please select a course.")
+            return
+        
+        course = backend.get_course_by_name(course_name)
+        if not course:
+            messagebox.showerror("Error", "Course not found.")
+            return
+        
+        # Get user's clubs
+        clubs = backend.get_clubs() or DEFAULT_CLUBS
+        
+        selector_win.destroy()
+        
+        HolePlanWindow(
+            parent=parent,
+            course_data=course,
+            hole_num=hole_num,
+            clubs=clubs,
+            yardbook_integration=yardbook_integration
+        )
+    
+    btn_frame = ttk.Frame(main_frame)
+    btn_frame.pack(fill='x')
+    
+    ttk.Button(
+        btn_frame,
+        text="Open Plan",
+        command=open_plan
+    ).pack(side='right', padx=5)
+    
+    ttk.Button(
+        btn_frame,
+        text="Cancel",
+        command=selector_win.destroy
+    ).pack(side='right')
+
 
 class GolfApp:
     def __init__(self, root):
