@@ -32,33 +32,8 @@ def _check_requests():
 _requests_available, requests = _check_requests()
 
 
-# Runtime capability detection for SAM (auto-trace)
-_sam_available = False
-_sam_error = None
-_numpy_available = False
-_cv2_available = False
-
-try:
-    import numpy as np
-    from PIL import Image
-    _numpy_available = True
-except ImportError as e:
-    _sam_error = f"NumPy/PIL not available: {e}"
-
-try:
-    import cv2
-    _cv2_available = True
-except ImportError:
-    if not _sam_error:
-        _sam_error = "OpenCV (cv2) not available. Install with: pip install opencv-python"
-
-try:
-    import torch
-    from segment_anything import sam_model_registry, SamPredictor
-    _sam_available = True
-except ImportError as e:
-    if not _sam_error:
-        _sam_error = f"SAM dependencies not available: {e}"
+# NOTE: SAM auto-trace feature has been removed.
+# The app now relies on OSM import and manual polygon drawing.
 
 # --- Data files ---
 COURSES_FILE = 'Data/courses.json'
@@ -83,10 +58,6 @@ GOLF_TAGS = {
     "water": {"tags": [("natural", "water"), ("golf", "water_hazard"), ("water", "pond"), ("water", "lake")], "polygon_type": "water"},
     "rough": {"tags": [("golf", "rough"), ("landuse", "grass")], "polygon_type": "native"},
 }
-
-# SAM Auto-trace constants
-SAM_MODEL_TYPE = "vit_h"
-SAM_CHECKPOINT_PATH = "Data/sam_vit_h_4b8939.pth"
 
 # Club categories for analytics
 CLUB_CATEGORIES = {
@@ -293,6 +264,7 @@ def calculate_hole_distances(map_features: Dict) -> Dict:
         "tee_to_green_back": None,
         "tee_to_green_center": None,
         "green_depth": None,
+        "route_distance": None,  # Route distance via waypoints (targets)
         "targets": [],
         "hazards": []
     }
@@ -327,6 +299,16 @@ def calculate_hole_distances(map_features: Dict) -> Dict:
             distances["tee_to_green_center"] = haversine_distance(
                 tee_lat, tee_lon, center[0], center[1]
             )
+            
+            # Calculate route distance (tee -> targets -> green_back)
+            # This handles curved fairways using targets as waypoints
+            route_distance = _calculate_route_distance(
+                tee_lat, tee_lon,
+                gb_lat, gb_lon,
+                map_features.get("targets", [])
+            )
+            if route_distance is not None:
+                distances["route_distance"] = route_distance
     
     for target in map_features.get("targets", []):
         if target.get("lat") is not None:
@@ -357,6 +339,57 @@ def calculate_hole_distances(map_features: Dict) -> Dict:
             })
     
     return distances
+
+
+def _calculate_route_distance(
+    tee_lat: float, tee_lon: float,
+    green_back_lat: float, green_back_lon: float,
+    targets: List[Dict]
+) -> Optional[float]:
+    """
+    Calculate route distance from tee to green_back through waypoints (targets).
+    
+    Uses targets as waypoints in order (sorted by distance from tee), computing
+    sum of segment distances: tee -> target[0] -> target[1] -> ... -> green_back
+    
+    This helps model curved fairways by using targets as intermediate waypoints.
+    
+    Args:
+        tee_lat, tee_lon: Tee position
+        green_back_lat, green_back_lon: Green back position
+        targets: List of target dicts with lat/lon keys
+    
+    Returns:
+        Route distance in yards, or None if no targets (use straight-line instead)
+    """
+    # Filter targets that have valid coordinates
+    valid_targets = [t for t in targets if t.get("lat") is not None and t.get("lon") is not None]
+    
+    if not valid_targets:
+        # No waypoints, route distance equals straight-line distance
+        return None
+    
+    # Sort targets by distance from tee (approximate play order)
+    sorted_targets = sorted(
+        valid_targets,
+        key=lambda t: haversine_distance(tee_lat, tee_lon, t["lat"], t["lon"])
+    )
+    
+    # Build route: tee -> sorted targets -> green_back
+    route_points = [(tee_lat, tee_lon)]
+    for t in sorted_targets:
+        route_points.append((t["lat"], t["lon"]))
+    route_points.append((green_back_lat, green_back_lon))
+    
+    # Sum segment distances
+    total_distance = 0.0
+    for i in range(len(route_points) - 1):
+        p1 = route_points[i]
+        p2 = route_points[i + 1]
+        segment_dist = haversine_distance(p1[0], p1[1], p2[0], p2[1])
+        total_distance += segment_dist
+    
+    return round(total_distance, 1)
 
 
 def validate_yardage_difference(
@@ -401,6 +434,25 @@ def polygon_area_sqyards(vertices: List[Tuple[float, float]]) -> float:
         area -= local_coords[j][0] * local_coords[i][1]
     
     return abs(area) / 2.0
+
+
+def polygon_area_from_vertices(vertices: List[Dict]) -> float:
+    """
+    Calculate polygon area from a list of vertex dicts with lat/lon keys.
+    Pure Python implementation using shoelace formula with local projection.
+    
+    Args:
+        vertices: List of dicts with 'lat' and 'lon' keys
+    
+    Returns:
+        Area in square yards (approximate)
+    """
+    if len(vertices) < 3:
+        return 0.0
+    
+    # Convert to tuple format
+    coords = [(v["lat"], v["lon"]) for v in vertices]
+    return polygon_area_sqyards(coords)
 
 
 # ============================================================================
@@ -923,6 +975,80 @@ def convert_to_internal_format(polygons: List[OSMPolygon]) -> Dict[str, List[Dic
     return result
 
 
+def select_best_polygon(
+    polygons: List[Dict],
+    center_lat: Optional[float] = None,
+    center_lon: Optional[float] = None,
+    prefer_largest: bool = True
+) -> Optional[Dict]:
+    """
+    Select the best polygon from multiple candidates.
+    
+    Uses a scoring system:
+    - Larger area polygons score higher (if prefer_largest=True)
+    - Closer to center (if center is provided) scores higher
+    
+    This is used by OSM import to select the best polygon when multiple
+    candidates of the same type are found.
+    
+    Args:
+        polygons: List of polygon dicts with 'vertices' key
+        center_lat: Optional center latitude for proximity scoring
+        center_lon: Optional center longitude for proximity scoring
+        prefer_largest: If True, prefer larger polygons; otherwise prefer closest
+    
+    Returns:
+        Best polygon dict, or None if no valid polygons
+    """
+    if not polygons:
+        return None
+    
+    if len(polygons) == 1:
+        return polygons[0]
+    
+    scored = []
+    
+    for poly in polygons:
+        vertices = poly.get("vertices", [])
+        if len(vertices) < 3:
+            continue
+        
+        # Calculate area
+        area = polygon_area_from_vertices(vertices)
+        
+        # Calculate centroid
+        centroid_lat = sum(v["lat"] for v in vertices) / len(vertices)
+        centroid_lon = sum(v["lon"] for v in vertices) / len(vertices)
+        
+        # Calculate distance to provided center (if available)
+        if center_lat is not None and center_lon is not None:
+            dist_to_center = haversine_distance(
+                center_lat, center_lon,
+                centroid_lat, centroid_lon
+            )
+        else:
+            dist_to_center = 0
+        
+        scored.append({
+            "polygon": poly,
+            "area": area,
+            "dist_to_center": dist_to_center
+        })
+    
+    if not scored:
+        return None
+    
+    # Sort by preferred criteria
+    if prefer_largest:
+        # Primary: largest area, secondary: closest to center
+        scored.sort(key=lambda x: (-x["area"], x["dist_to_center"]))
+    else:
+        # Primary: closest to center, secondary: largest area
+        scored.sort(key=lambda x: (x["dist_to_center"], -x["area"]))
+    
+    return scored[0]["polygon"]
+
+
 def import_osm_features(
     center_lat: float,
     center_lon: float,
@@ -1027,384 +1153,6 @@ def get_osm_feature_stats(features: Dict[str, List[Dict]]) -> Dict[str, int]:
     """Get statistics about imported OSM features."""
     return {ftype: len(polys) for ftype, polys in features.items() if polys}
 
-
-# ============================================================================
-# SAM AUTO-TRACE FUNCTIONS (from sam_autotrace.py)
-# ============================================================================
-
-@dataclass
-class TracedPolygon:
-    """Represents a traced polygon from SAM segmentation."""
-    vertices: List[Tuple[float, float]]
-    confidence: float
-    area: int
-    bbox: Tuple[int, int, int, int]
-
-
-def is_sam_available() -> bool:
-    """Check if SAM auto-trace feature is available."""
-    return _sam_available and _numpy_available and _cv2_available
-
-
-def get_sam_unavailable_message() -> str:
-    """Get a user-friendly message about missing SAM dependencies."""
-    if _sam_available and _numpy_available and _cv2_available:
-        return ""
-    
-    msg = "SAM Auto-Trace requires additional dependencies.\n\n"
-    msg += "To enable this feature, install:\n"
-    msg += "  pip install torch torchvision\n"
-    msg += "  pip install segment-anything\n"
-    msg += "  pip install opencv-python\n"
-    msg += "  pip install numpy pillow\n\n"
-    msg += "Then download the SAM model weights (~2.5GB):\n"
-    msg += "  https://github.com/facebookresearch/segment-anything\n\n"
-    
-    if _sam_error:
-        msg += f"Current error: {_sam_error}"
-    
-    return msg
-
-
-class SAMTracer:
-    """SAM-based auto-tracing for golf course features."""
-    
-    def __init__(self, checkpoint_path: Optional[str] = None, device: str = "auto"):
-        if not is_sam_available():
-            raise RuntimeError(get_sam_unavailable_message())
-        
-        self.checkpoint_path = checkpoint_path or SAM_CHECKPOINT_PATH
-        
-        if device == "auto":
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        else:
-            self.device = device
-        
-        self.sam = None
-        self.predictor = None
-        self._image_set = False
-        self._current_image = None
-    
-    def load_model(self) -> bool:
-        if not os.path.exists(self.checkpoint_path):
-            return False
-        
-        try:
-            self.sam = sam_model_registry[SAM_MODEL_TYPE](checkpoint=self.checkpoint_path)
-            self.sam.to(device=self.device)
-            self.predictor = SamPredictor(self.sam)
-            return True
-        except Exception as e:
-            print(f"Failed to load SAM model: {e}")
-            return False
-    
-    def is_model_loaded(self) -> bool:
-        return self.predictor is not None
-    
-    def set_image(self, image: Any) -> bool:
-        if not self.is_model_loaded():
-            return False
-        
-        try:
-            if isinstance(image, str):
-                image = np.array(Image.open(image))
-            elif hasattr(image, 'convert'):
-                image = np.array(image.convert('RGB'))
-            
-            self._current_image = image
-            self.predictor.set_image(image)
-            self._image_set = True
-            return True
-        except Exception as e:
-            print(f"Failed to set image: {e}")
-            return False
-    
-    def segment_point(
-        self, 
-        point: Tuple[int, int],
-        point_label: int = 1
-    ) -> Optional[TracedPolygon]:
-        if not self._image_set:
-            return None
-        
-        try:
-            input_point = np.array([[point[0], point[1]]])
-            input_label = np.array([point_label])
-            
-            masks, scores, _ = self.predictor.predict(
-                point_coords=input_point,
-                point_labels=input_label,
-                multimask_output=True
-            )
-            
-            best_idx = np.argmax(scores)
-            mask = masks[best_idx]
-            score = float(scores[best_idx])
-            
-            polygon = mask_to_polygon(mask)
-            
-            if polygon is None:
-                return None
-            
-            return TracedPolygon(
-                vertices=polygon,
-                confidence=score,
-                area=int(np.sum(mask)),
-                bbox=get_mask_bbox(mask)
-            )
-        except Exception as e:
-            print(f"Segmentation failed: {e}")
-            return None
-    
-    def segment_box(
-        self, 
-        box: Tuple[int, int, int, int]
-    ) -> Optional[TracedPolygon]:
-        if not self._image_set:
-            return None
-        
-        try:
-            input_box = np.array([box])
-            
-            masks, scores, _ = self.predictor.predict(
-                box=input_box,
-                multimask_output=True
-            )
-            
-            best_idx = np.argmax(scores)
-            mask = masks[best_idx]
-            score = float(scores[best_idx])
-            
-            polygon = mask_to_polygon(mask)
-            
-            if polygon is None:
-                return None
-            
-            return TracedPolygon(
-                vertices=polygon,
-                confidence=score,
-                area=int(np.sum(mask)),
-                bbox=get_mask_bbox(mask)
-            )
-        except Exception as e:
-            print(f"Box segmentation failed: {e}")
-            return None
-    
-    def clear(self):
-        self._image_set = False
-        self._current_image = None
-
-
-def mask_to_polygon(
-    mask: 'np.ndarray', 
-    simplify_tolerance: float = 2.0
-) -> Optional[List[Tuple[float, float]]]:
-    """Convert a binary mask to a polygon outline."""
-    if not _cv2_available or not _numpy_available:
-        return None
-    
-    try:
-        mask_uint8 = (mask * 255).astype(np.uint8)
-        
-        contours, _ = cv2.findContours(
-            mask_uint8, 
-            cv2.RETR_EXTERNAL, 
-            cv2.CHAIN_APPROX_SIMPLE
-        )
-        
-        if not contours:
-            return None
-        
-        largest = max(contours, key=cv2.contourArea)
-        
-        epsilon = simplify_tolerance
-        simplified = cv2.approxPolyDP(largest, epsilon, True)
-        
-        vertices = [(float(pt[0][0]), float(pt[0][1])) for pt in simplified]
-        
-        if len(vertices) < 3:
-            return None
-        
-        return vertices
-    except Exception as e:
-        print(f"Mask to polygon conversion failed: {e}")
-        return None
-
-
-def get_mask_bbox(mask: 'np.ndarray') -> Tuple[int, int, int, int]:
-    """Get bounding box of a mask."""
-    rows = np.any(mask, axis=1)
-    cols = np.any(mask, axis=0)
-    
-    if not np.any(rows) or not np.any(cols):
-        return (0, 0, 0, 0)
-    
-    y_min, y_max = np.where(rows)[0][[0, -1]]
-    x_min, x_max = np.where(cols)[0][[0, -1]]
-    
-    return (int(x_min), int(y_min), int(x_max - x_min), int(y_max - y_min))
-
-
-def pixels_to_geo(
-    pixel_coords: List[Tuple[float, float]],
-    image_bounds: Tuple[float, float, float, float],
-    image_size: Tuple[int, int]
-) -> List[Dict[str, float]]:
-    """Convert pixel coordinates to geographic coordinates."""
-    min_lat, max_lat, min_lon, max_lon = image_bounds
-    width, height = image_size
-    
-    lat_range = max_lat - min_lat
-    lon_range = max_lon - min_lon
-    
-    geo_coords = []
-    for x, y in pixel_coords:
-        norm_x = x / width
-        norm_y = y / height
-        
-        lon = min_lon + (norm_x * lon_range)
-        lat = max_lat - (norm_y * lat_range)
-        
-        geo_coords.append({"lat": lat, "lon": lon})
-    
-    return geo_coords
-
-
-def geo_to_pixels(
-    geo_coords: List[Dict[str, float]],
-    image_bounds: Tuple[float, float, float, float],
-    image_size: Tuple[int, int]
-) -> List[Tuple[int, int]]:
-    """Convert geographic coordinates to pixel coordinates."""
-    min_lat, max_lat, min_lon, max_lon = image_bounds
-    width, height = image_size
-    
-    lat_range = max_lat - min_lat
-    lon_range = max_lon - min_lon
-    
-    pixel_coords = []
-    for coord in geo_coords:
-        lat, lon = coord["lat"], coord["lon"]
-        
-        norm_x = (lon - min_lon) / lon_range
-        norm_y = (max_lat - lat) / lat_range
-        
-        x = int(norm_x * width)
-        y = int(norm_y * height)
-        
-        pixel_coords.append((x, y))
-    
-    return pixel_coords
-
-
-def simplify_polygon_rdp(
-    vertices: List[Tuple[float, float]], 
-    tolerance: float = 1.0
-) -> List[Tuple[float, float]]:
-    """Simplify polygon using Ramer-Douglas-Peucker algorithm (pure Python)."""
-    if len(vertices) <= 3:
-        return vertices
-    
-    def perpendicular_distance(point, line_start, line_end):
-        dx = line_end[0] - line_start[0]
-        dy = line_end[1] - line_start[1]
-        
-        if dx == 0 and dy == 0:
-            return ((point[0] - line_start[0])**2 + (point[1] - line_start[1])**2)**0.5
-        
-        t = max(0, min(1, 
-            ((point[0] - line_start[0]) * dx + (point[1] - line_start[1]) * dy) / 
-            (dx * dx + dy * dy)))
-        
-        proj_x = line_start[0] + t * dx
-        proj_y = line_start[1] + t * dy
-        
-        return ((point[0] - proj_x)**2 + (point[1] - proj_y)**2)**0.5
-    
-    def rdp_recursive(points, start, end):
-        if end - start < 2:
-            return []
-        
-        max_dist = 0
-        max_idx = start
-        
-        for i in range(start + 1, end):
-            dist = perpendicular_distance(points[i], points[start], points[end])
-            if dist > max_dist:
-                max_dist = dist
-                max_idx = i
-        
-        if max_dist > tolerance:
-            left = rdp_recursive(points, start, max_idx)
-            right = rdp_recursive(points, max_idx, end)
-            return left + [max_idx] + right
-        
-        return []
-    
-    keep_indices = [0] + rdp_recursive(vertices, 0, len(vertices) - 1) + [len(vertices) - 1]
-    keep_indices = sorted(set(keep_indices))
-    
-    return [vertices[i] for i in keep_indices]
-
-
-def extract_map_tile_image(
-    map_widget: Any,
-    bounds: Optional[Tuple[float, float, float, float]] = None
-) -> Optional[Tuple[Any, Tuple[float, float, float, float], Tuple[int, int]]]:
-    """Extract the current visible map tile as an image."""
-    try:
-        from PIL import ImageGrab
-        
-        x = map_widget.winfo_rootx()
-        y = map_widget.winfo_rooty()
-        width = map_widget.winfo_width()
-        height = map_widget.winfo_height()
-        
-        image = ImageGrab.grab(bbox=(x, y, x + width, y + height))
-        
-        if bounds is None:
-            try:
-                pos = map_widget.get_position()
-                zoom = map_widget.zoom
-                
-                deg_per_pixel = 360 / (256 * (2 ** zoom))
-                
-                half_w = (width / 2) * deg_per_pixel
-                half_h = (height / 2) * deg_per_pixel
-                
-                center_lat, center_lon = pos
-                bounds = (
-                    center_lat - half_h,
-                    center_lat + half_h,
-                    center_lon - half_w,
-                    center_lon + half_w
-                )
-            except:
-                return None
-        
-        return (image, bounds, (width, height))
-    except Exception as e:
-        print(f"Map tile extraction failed: {e}")
-        return None
-
-
-# Singleton tracer instance (lazily initialized)
-_global_tracer = None
-
-
-def get_tracer(checkpoint_path: Optional[str] = None) -> Optional[SAMTracer]:
-    """Get or create the global SAM tracer instance."""
-    global _global_tracer
-    
-    if not is_sam_available():
-        return None
-    
-    if _global_tracer is None:
-        _global_tracer = SAMTracer(checkpoint_path)
-        if not _global_tracer.load_model():
-            _global_tracer = None
-    
-    return _global_tracer
 
 
 # ============================================================================
