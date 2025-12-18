@@ -1575,6 +1575,9 @@ class GolfBackend:
         Filter and sort rounds.
         round_type: 'all', 'solo', 'scramble'
         sort_by: 'recent', 'best', 'worst'
+        
+        For best/worst sorting, uses score relative to par to properly compare
+        9-hole and 18-hole rounds (e.g., 80 on par 72 = +8, 54 on par 35 = +19)
         """
         rounds_with_idx = [(i, r) for i, r in enumerate(self.rounds)]
 
@@ -1590,11 +1593,28 @@ class GolfBackend:
         if sort_by == "recent":
             rounds_with_idx.sort(key=lambda x: x[1].get("date", ""), reverse=True)
         elif sort_by == "best":
-            rounds_with_idx.sort(key=lambda x: x[1].get("total_score", 999))
+            # Sort by score relative to par (lower is better)
+            rounds_with_idx.sort(key=lambda x: self._get_score_relative_to_par(x[1]))
         elif sort_by == "worst":
-            rounds_with_idx.sort(key=lambda x: x[1].get("total_score", 0), reverse=True)
+            # Sort by score relative to par (higher is worse)
+            rounds_with_idx.sort(key=lambda x: self._get_score_relative_to_par(x[1]), reverse=True)
 
         return rounds_with_idx
+    
+    def _get_score_relative_to_par(self, round_data: dict) -> int:
+        """
+        Calculate score relative to par for proper comparison of 9 vs 18 hole rounds.
+        Returns total_score - total_par (e.g., 80 on par 72 = +8)
+        """
+        total_score = round_data.get("total_score", 999)
+        total_par = round_data.get("total_par", 0)
+        
+        if total_par == 0:
+            # Fallback: estimate par based on holes played
+            holes_played = round_data.get("holes_played", 18)
+            total_par = holes_played * 4  # Assume par 4 average
+        
+        return total_score - total_par
 
     # ---- Aggregates ----
     def calculate_9hole_expected_differential(self, handicap_index):

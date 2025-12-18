@@ -368,6 +368,7 @@ class yardbookView:
         self.dragging_marker = None
         self.drag_marker_type = None
         self.drag_marker_index = None
+        self.dragging_break_index = None  # NEW: For dragging aim line break points
         
         # Map objects tracking (for cleanup)
         self.map_markers: Dict[str, any] = {}
@@ -855,13 +856,23 @@ class yardbookView:
         """Handle map click based on current mode."""
         lat, lon = coords
         
+        # Check if we're dragging a break marker (any mode)
+        if self._handle_break_marker_drag(lat, lon):
+            return
+        
         if self.current_mode == self.MODE_PAN:
+            # Check if clicked on a break marker to start dragging
+            if self._handle_break_marker_click(lat, lon):
+                return
             return  # Let map handle panning
         
         elif self.current_mode == self.MODE_DELETE:
             self._handle_delete_click(lat, lon)
         
         elif self.current_mode == self.MODE_MOVE:
+            # Check if clicked on a break marker first
+            if self._handle_break_marker_click(lat, lon):
+                return
             # Move mode click is handled by marker drag
             self._handle_move_click(lat, lon)
         
@@ -898,10 +909,6 @@ class yardbookView:
         # Update aim lines if enabled
         if self.show_aim_lines.get():
             self._render_aim_lines()
-        
-        # Update on-map distances
-        if self.show_on_map_distances.get():
-            self._render_on_map_distances()
     
     def _handle_delete_click(self, lat: float, lon: float):
         """Handle click in delete mode - find and delete nearest marker."""
@@ -1350,11 +1357,20 @@ class yardbookView:
             print(f"Error rendering polygon: {e}")
     
     def _render_aim_lines(self):
-        """Render aim lines from tee to targets and green."""
+        """
+        Render segmented aim lines from tee to green with par-based breaks.
+        
+        Rules:
+        - Par 3: 0 breaks (single segment)
+        - Par 4: 1 break (two segments)
+        - Par 5: 2 breaks (three segments)
+        
+        Break points are draggable and stored in features.aim_breaks.
+        """
         if not self.map_widget:
             return
         
-        # Clear existing aim lines
+        # Clear existing aim lines and break markers
         for line in self.aim_lines:
             try:
                 line.delete()
@@ -1362,42 +1378,291 @@ class yardbookView:
                 pass
         self.aim_lines = []
         
+        for marker in self.break_markers:
+            try:
+                marker.delete()
+            except:
+                pass
+        self.break_markers = []
+        
         if not self.features.tee.is_set():
             return
         
         tee = (self.features.tee.lat, self.features.tee.lon)
         
-        # Line to green center
+        # Determine aim endpoint (green front if set, else green back, else green center)
+        aim_endpoint = None
         if self.features.green_front.is_set() and self.features.green_back.is_set():
-            center = midpoint(
+            # Use center of green as endpoint
+            aim_endpoint = midpoint(
                 self.features.green_front.lat, self.features.green_front.lon,
                 self.features.green_back.lat, self.features.green_back.lon
             )
-            line = self.map_widget.set_path(
-                [tee, center],
-                color="#44FF44",
-                width=2
-            )
-            self.aim_lines.append(line)
         elif self.features.green_front.is_set():
-            gf = (self.features.green_front.lat, self.features.green_front.lon)
-            line = self.map_widget.set_path(
-                [tee, gf],
-                color="#44FF44",
-                width=2
-            )
-            self.aim_lines.append(line)
+            aim_endpoint = (self.features.green_front.lat, self.features.green_front.lon)
+        elif self.features.green_back.is_set():
+            aim_endpoint = (self.features.green_back.lat, self.features.green_back.lon)
         
-        # Lines to targets
-        for target in self.features.targets:
-            if target.lat is not None:
-                t = (target.lat, target.lon)
+        if not aim_endpoint:
+            return
+        
+        # Determine number of breaks based on par
+        num_breaks = self._get_break_count_for_par()
+        
+        # Initialize aim_breaks if needed (ensure correct count)
+        self._initialize_aim_breaks(num_breaks, tee, aim_endpoint)
+        
+        # Build the path: tee -> breaks -> aim_endpoint
+        path_points = [tee]
+        for i, break_point in enumerate(self.features.aim_breaks[:num_breaks]):
+            if break_point.is_set():
+                path_points.append((break_point.lat, break_point.lon))
+        path_points.append(aim_endpoint)
+        
+        # Draw the segmented aim line
+        if len(path_points) >= 2:
+            try:
                 line = self.map_widget.set_path(
-                    [tee, t],
-                    color="#FFFF44",
-                    width=1
+                    path_points,
+                    color="#44FF44",
+                    width=3
                 )
                 self.aim_lines.append(line)
+            except Exception as e:
+                print(f"Error rendering aim line: {e}")
+        
+        # Draw break point markers (draggable via click)
+        for i, break_point in enumerate(self.features.aim_breaks[:num_breaks]):
+            if break_point.is_set():
+                self._render_break_marker(break_point, i)
+        
+        # Render segment distance labels on the map
+        self._render_segment_distances(path_points)
+        
+        # Also render on-map distances for green/hazards/targets
+        self._render_on_map_distances()
+    
+    def _get_break_count_for_par(self) -> int:
+        """Get number of aim line breaks based on hole par."""
+        if self.hole_par <= 3:
+            return 0  # Par 3: no breaks
+        elif self.hole_par == 4:
+            return 1  # Par 4: 1 break
+        else:
+            return 2  # Par 5+: 2 breaks
+    
+    def _initialize_aim_breaks(self, num_breaks: int, tee: Tuple[float, float], endpoint: Tuple[float, float]):
+        """
+        Initialize aim break points if they don't exist or need adjustment.
+        Places breaks evenly along the tee-to-endpoint line.
+        """
+        # Only initialize if we don't have the right number of breaks
+        current_breaks = len([b for b in self.features.aim_breaks if b.is_set()])
+        
+        if current_breaks != num_breaks:
+            self.features.aim_breaks = []
+            
+            if num_breaks > 0:
+                # Calculate evenly spaced break points
+                for i in range(num_breaks):
+                    fraction = (i + 1) / (num_breaks + 1)
+                    break_lat = tee[0] + fraction * (endpoint[0] - tee[0])
+                    break_lon = tee[1] + fraction * (endpoint[1] - tee[1])
+                    self.features.aim_breaks.append(GeoPoint(lat=break_lat, lon=break_lon))
+    
+    def _render_break_marker(self, break_point: GeoPoint, index: int):
+        """Render a draggable break point marker."""
+        if not self.map_widget or not break_point.is_set():
+            return
+        
+        try:
+            # Create marker with drag callback
+            marker = self.map_widget.set_marker(
+                break_point.lat, break_point.lon,
+                text=f"B{index + 1}",
+                marker_color_circle="#FF9900",
+                marker_color_outside="#FFCC00"
+            )
+            self.break_markers.append(marker)
+            
+            # Store index for drag handling
+            marker._break_index = index
+        except Exception as e:
+            print(f"Error rendering break marker: {e}")
+    
+    def _render_segment_distances(self, path_points: List[Tuple[float, float]]):
+        """Render distance labels at segment midpoints."""
+        if not self.map_widget or len(path_points) < 2:
+            return
+        
+        # Clear existing segment distance labels
+        for key in list(self.distance_labels.keys()):
+            if key.startswith("seg_"):
+                try:
+                    self.distance_labels[key].delete()
+                except:
+                    pass
+                del self.distance_labels[key]
+        
+        # Render distance for each segment
+        for i in range(len(path_points) - 1):
+            p1 = path_points[i]
+            p2 = path_points[i + 1]
+            
+            # Calculate segment distance
+            seg_dist = haversine_distance(p1[0], p1[1], p2[0], p2[1])
+            
+            # Calculate midpoint for label placement
+            mid_lat = (p1[0] + p2[0]) / 2
+            mid_lon = (p1[1] + p2[1]) / 2
+            
+            # Slight offset to avoid overlapping the line
+            mid_lat += 0.00003
+            
+            # Create label
+            label_text = f"{seg_dist:.0f}y"
+            
+            try:
+                marker = self.map_widget.set_marker(
+                    mid_lat, mid_lon,
+                    text=label_text,
+                    marker_color_circle="#FFFFFF",
+                    marker_color_outside="#44FF44"
+                )
+                self.distance_labels[f"seg_{i}"] = marker
+            except:
+                pass
+    
+    def _render_on_map_distances(self):
+        """
+        Render distance labels directly on the map for green, hazards, and targets.
+        """
+        if not self.map_widget:
+            return
+        
+        # Clear existing non-segment distance labels
+        for key in list(self.distance_labels.keys()):
+            if not key.startswith("seg_"):
+                try:
+                    self.distance_labels[key].delete()
+                except:
+                    pass
+                del self.distance_labels[key]
+        
+        if not self.features.tee.is_set():
+            return
+        
+        tee_lat, tee_lon = self.features.tee.lat, self.features.tee.lon
+        
+        # Green front distance label
+        if self.features.green_front.is_set():
+            gf_lat, gf_lon = self.features.green_front.lat, self.features.green_front.lon
+            dist = haversine_distance(tee_lat, tee_lon, gf_lat, gf_lon)
+            
+            try:
+                marker = self.map_widget.set_marker(
+                    gf_lat + 0.00006, gf_lon,
+                    text=f"F {dist:.0f}y",
+                    marker_color_circle="#44FF44",
+                    marker_color_outside="#FFFFFF"
+                )
+                self.distance_labels["green_front"] = marker
+            except:
+                pass
+        
+        # Green back distance label
+        if self.features.green_back.is_set():
+            gb_lat, gb_lon = self.features.green_back.lat, self.features.green_back.lon
+            dist = haversine_distance(tee_lat, tee_lon, gb_lat, gb_lon)
+            
+            try:
+                marker = self.map_widget.set_marker(
+                    gb_lat + 0.00006, gb_lon,
+                    text=f"B {dist:.0f}y",
+                    marker_color_circle="#44FF44",
+                    marker_color_outside="#FFFFFF"
+                )
+                self.distance_labels["green_back"] = marker
+            except:
+                pass
+        
+        # Target distance labels
+        for i, target in enumerate(self.features.targets):
+            if target.lat is not None and target.lon is not None:
+                dist = haversine_distance(tee_lat, tee_lon, target.lat, target.lon)
+                
+                # Use target name if short, otherwise T1, T2, etc.
+                name = target.name[:5] if target.name and len(target.name) <= 5 else f"T{i+1}"
+                label_text = f"{name} {dist:.0f}y"
+                
+                try:
+                    marker = self.map_widget.set_marker(
+                        target.lat + 0.00005, target.lon,
+                        text=label_text,
+                        marker_color_circle="#FFFF44",
+                        marker_color_outside="#333333"
+                    )
+                    self.distance_labels[f"target_{i}"] = marker
+                except:
+                    pass
+        
+        # Hazard distance labels
+        for i, hazard in enumerate(self.features.hazards):
+            if hazard.lat is not None and hazard.lon is not None:
+                dist = haversine_distance(tee_lat, tee_lon, hazard.lat, hazard.lon)
+                
+                # Label based on hazard type
+                htype = hazard.hazard_type
+                if htype == "water":
+                    prefix = "W"
+                    color = "#4444FF"
+                elif htype == "bunker":
+                    prefix = "S"  # Sand
+                    color = "#F4E4C1"
+                elif htype == "ob":
+                    prefix = "OB"
+                    color = "#FFFFFF"
+                else:
+                    prefix = "HZ"
+                    color = "#FF6666"
+                
+                label_text = f"{prefix} {dist:.0f}y"
+                
+                try:
+                    marker = self.map_widget.set_marker(
+                        hazard.lat + 0.00005, hazard.lon,
+                        text=label_text,
+                        marker_color_circle=color,
+                        marker_color_outside="#FF0000"
+                    )
+                    self.distance_labels[f"hazard_{i}"] = marker
+                except:
+                    pass
+    
+    def _handle_break_marker_click(self, lat: float, lon: float):
+        """Handle click near a break marker - start dragging."""
+        # Check if click is near a break marker
+        for i, break_point in enumerate(self.features.aim_breaks):
+            if break_point.is_set():
+                dist = haversine_distance(lat, lon, break_point.lat, break_point.lon)
+                if dist < 15:  # Within 15 yards = click on marker
+                    self.dragging_break_index = i
+                    self._set_status(f"Dragging break point B{i+1}. Click to place.")
+                    return True
+        return False
+    
+    def _handle_break_marker_drag(self, lat: float, lon: float):
+        """Handle placing a dragged break marker."""
+        if hasattr(self, 'dragging_break_index') and self.dragging_break_index is not None:
+            idx = self.dragging_break_index
+            if 0 <= idx < len(self.features.aim_breaks):
+                self.features.aim_breaks[idx] = GeoPoint(lat=lat, lon=lon)
+                self.unsaved_changes = True
+                self._render_aim_lines()
+                self._set_status(f"Break point B{idx+1} moved.")
+            self.dragging_break_index = None
+            return True
+        return False
     
     def _update_distance_rings(self):
         """Update distance ring display based on selections."""
@@ -2549,361 +2814,11 @@ def create_distance_display_widget(
     return frame
 
 
-# ============================================================================
-# HOLE PLAN WINDOW (from hole_plan.py)
-# ============================================================================
-
-# Default clubs for users without club data configured
-DEFAULT_CLUBS = [
-    {"name": "Driver", "distance": 250},
-    {"name": "3 Wood", "distance": 230},
-    {"name": "5 Wood", "distance": 210},
-    {"name": "4 Hybrid", "distance": 195},
-    {"name": "5 Iron", "distance": 180},
-    {"name": "6 Iron", "distance": 170},
-    {"name": "7 Iron", "distance": 160},
-    {"name": "8 Iron", "distance": 150},
-    {"name": "9 Iron", "distance": 140},
-    {"name": "PW", "distance": 130},
-    {"name": "GW", "distance": 115},
-    {"name": "SW", "distance": 100},
-    {"name": "LW", "distance": 80},
-]
-
-
-class HolePlanWindow:
-    """
-    Strategy planning window for an individual hole.
-    Displays hole info and lets user plan their shots.
-    """
-    
-    def __init__(
-        self,
-        parent: tk.Tk,
-        course_data: Dict,
-        hole_num: int,
-        clubs: List[Dict],
-        yardbook_integration: Optional[Any] = None
-    ):
-        self.parent = parent
-        self.course_data = course_data
-        self.hole_num = hole_num
-        self.clubs = clubs if clubs else DEFAULT_CLUBS
-        self.yardbook = yardbook_integration
-        
-        # Get hole info
-        pars = course_data.get("pars", [])
-        self.hole_par = pars[hole_num - 1] if hole_num <= len(pars) else 4
-        
-        # Get yardage from first available tee
-        yardages = course_data.get("yardages", {})
-        self.hole_yardage = 0
-        self.selected_tee = None
-        for tee, yards in yardages.items():
-            if hole_num <= len(yards):
-                self.hole_yardage = yards[hole_num - 1]
-                self.selected_tee = tee
-                break
-        
-        # Shot plan
-        self.shot_plan: List[Dict] = []
-        
-        # Build UI
-        self._create_window()
-    
-    def _create_window(self):
-        """Create the planning window."""
-        self.window = tk.Toplevel(self.parent)
-        self.window.title(f"Hole {self.hole_num} Plan - {self.course_data.get('name', 'Course')}")
-        self.window.geometry("600x500")
-        self.window.transient(self.parent)
-        
-        main_frame = ttk.Frame(self.window, padding=15)
-        main_frame.pack(fill='both', expand=True)
-        
-        # Header
-        header = ttk.Frame(main_frame)
-        header.pack(fill='x', pady=(0, 15))
-        
-        ttk.Label(
-            header,
-            text=f"Hole {self.hole_num}",
-            font=("Helvetica", 18, "bold")
-        ).pack(side='left')
-        
-        info_text = f"Par {self.hole_par}"
-        if self.hole_yardage:
-            info_text += f" • {self.hole_yardage} yards"
-            if self.selected_tee:
-                info_text += f" ({self.selected_tee})"
-        
-        ttk.Label(
-            header,
-            text=info_text,
-            font=("Helvetica", 12)
-        ).pack(side='left', padx=20)
-        
-        # Shot planning area
-        plan_frame = ttk.LabelFrame(main_frame, text="Shot Plan", padding=10)
-        plan_frame.pack(fill='both', expand=True, pady=(0, 10))
-        
-        # Remaining distance display
-        self.remaining_var = tk.StringVar(value=f"Remaining: {self.hole_yardage} yards")
-        ttk.Label(
-            plan_frame,
-            textvariable=self.remaining_var,
-            font=("Helvetica", 12, "bold")
-        ).pack(anchor='w', pady=(0, 10))
-        
-        # Shot list
-        self.shots_frame = ttk.Frame(plan_frame)
-        self.shots_frame.pack(fill='both', expand=True)
-        
-        # Add shot button
-        add_frame = ttk.Frame(plan_frame)
-        add_frame.pack(fill='x', pady=10)
-        
-        ttk.Label(add_frame, text="Add shot:").pack(side='left')
-        
-        self.club_var = tk.StringVar()
-        club_combo = ttk.Combobox(
-            add_frame,
-            textvariable=self.club_var,
-            values=[f"{c['name']} ({c['distance']}y)" for c in self.clubs],
-            state='readonly',
-            width=20
-        )
-        club_combo.pack(side='left', padx=5)
-        if self.clubs:
-            club_combo.set(f"{self.clubs[0]['name']} ({self.clubs[0]['distance']}y)")
-        
-        ttk.Button(
-            add_frame,
-            text="+ Add Shot",
-            command=self._add_shot
-        ).pack(side='left', padx=5)
-        
-        ttk.Button(
-            add_frame,
-            text="Clear All",
-            command=self._clear_shots
-        ).pack(side='left', padx=5)
-        
-        # Strategy notes
-        notes_frame = ttk.LabelFrame(main_frame, text="Strategy Notes", padding=10)
-        notes_frame.pack(fill='x', pady=(0, 10))
-        
-        self.notes_text = tk.Text(notes_frame, height=3, wrap='word')
-        self.notes_text.pack(fill='x')
-        
-        # Buttons
-        btn_frame = ttk.Frame(main_frame)
-        btn_frame.pack(fill='x')
-        
-        if self.yardbook and self.yardbook.is_available():
-            ttk.Button(
-                btn_frame,
-                text="📍 Open Yardbook",
-                command=self._open_yardbook
-            ).pack(side='left')
-        
-        ttk.Button(
-            btn_frame,
-            text="Close",
-            command=self.window.destroy
-        ).pack(side='right')
-    
-    def _add_shot(self):
-        """Add a shot to the plan."""
-        selection = self.club_var.get()
-        if not selection:
-            return
-        
-        # Parse club selection
-        for club in self.clubs:
-            if f"{club['name']} ({club['distance']}y)" == selection:
-                shot = {
-                    "club": club["name"],
-                    "distance": club["distance"],
-                    "shot_num": len(self.shot_plan) + 1
-                }
-                self.shot_plan.append(shot)
-                self._update_shots_display()
-                break
-    
-    def _remove_shot(self, index: int):
-        """Remove a shot from the plan."""
-        if 0 <= index < len(self.shot_plan):
-            self.shot_plan.pop(index)
-            # Renumber shots
-            for i, shot in enumerate(self.shot_plan):
-                shot["shot_num"] = i + 1
-            self._update_shots_display()
-    
-    def _clear_shots(self):
-        """Clear all shots."""
-        self.shot_plan = []
-        self._update_shots_display()
-    
-    def _update_shots_display(self):
-        """Update the shots display."""
-        # Clear existing
-        for widget in self.shots_frame.winfo_children():
-            widget.destroy()
-        
-        # Calculate remaining
-        total_distance = sum(s["distance"] for s in self.shot_plan)
-        remaining = self.hole_yardage - total_distance
-        
-        self.remaining_var.set(f"Remaining: {remaining} yards")
-        
-        # Display shots
-        for i, shot in enumerate(self.shot_plan):
-            shot_frame = ttk.Frame(self.shots_frame)
-            shot_frame.pack(fill='x', pady=2)
-            
-            ttk.Label(
-                shot_frame,
-                text=f"Shot {shot['shot_num']}: {shot['club']} → {shot['distance']} yards",
-                font=("Helvetica", 10)
-            ).pack(side='left')
-            
-            ttk.Button(
-                shot_frame,
-                text="✕",
-                width=3,
-                command=lambda idx=i: self._remove_shot(idx)
-            ).pack(side='right')
-        
-        # Summary
-        if self.shot_plan:
-            ttk.Separator(self.shots_frame, orient='horizontal').pack(fill='x', pady=5)
-            
-            summary_text = f"Total: {len(self.shot_plan)} shots, {total_distance} yards"
-            if remaining > 0:
-                summary_text += f" (need {remaining} more)"
-            elif remaining < 0:
-                summary_text += f" ({abs(remaining)} past green)"
-            else:
-                summary_text += " (on green!)"
-            
-            ttk.Label(
-                self.shots_frame,
-                text=summary_text,
-                font=("Helvetica", 10, "italic")
-            ).pack(anchor='w')
-    
-    def _open_yardbook(self):
-        """Open yardbook for this hole."""
-        if self.yardbook:
-            self.yardbook.open_hole_direct(
-                self.parent,
-                self.course_data.get("name", ""),
-                self.hole_num
-            )
-
-
-def open_hole_plan(
-    parent: tk.Tk,
-    backend: Any,
-    courses_file: str,
-    yardbook_integration: Optional[Any] = None
-):
-    """
-    Open the hole plan selector/launcher.
-    Shows a course and hole selector, then opens the planning window.
-    """
-    # Create selector dialog
-    selector_win = tk.Toplevel(parent)
-    selector_win.title("Select Hole to Plan")
-    selector_win.geometry("400x300")
-    selector_win.transient(parent)
-    selector_win.grab_set()
-    
-    main_frame = ttk.Frame(selector_win, padding=15)
-    main_frame.pack(fill='both', expand=True)
-    
-    ttk.Label(
-        main_frame,
-        text="📝 Hole Plan",
-        font=("Helvetica", 16, "bold")
-    ).pack(pady=(0, 15))
-    
-    # Course selection
-    ttk.Label(main_frame, text="Course:").pack(anchor='w')
-    course_var = tk.StringVar()
-    courses = backend.get_courses()
-    course_names = [c["name"] for c in courses]
-    course_combo = ttk.Combobox(
-        main_frame,
-        textvariable=course_var,
-        values=course_names,
-        state='readonly',
-        width=40
-    )
-    course_combo.pack(fill='x', pady=(0, 10))
-    if course_names:
-        course_combo.set(course_names[0])
-    
-    # Hole selection
-    ttk.Label(main_frame, text="Hole:").pack(anchor='w')
-    hole_var = tk.IntVar(value=1)
-    hole_spin = ttk.Spinbox(
-        main_frame,
-        from_=1,
-        to=18,
-        textvariable=hole_var,
-        width=10
-    )
-    hole_spin.pack(anchor='w', pady=(0, 15))
-    
-    def open_plan():
-        course_name = course_var.get()
-        hole_num = hole_var.get()
-        
-        if not course_name:
-            messagebox.showwarning("Warning", "Please select a course.")
-            return
-        
-        course = backend.get_course_by_name(course_name)
-        if not course:
-            messagebox.showerror("Error", "Course not found.")
-            return
-        
-        # Get user's clubs
-        clubs = backend.get_clubs() or DEFAULT_CLUBS
-        
-        selector_win.destroy()
-        
-        HolePlanWindow(
-            parent=parent,
-            course_data=course,
-            hole_num=hole_num,
-            clubs=clubs,
-            yardbook_integration=yardbook_integration
-        )
-    
-    btn_frame = ttk.Frame(main_frame)
-    btn_frame.pack(fill='x')
-    
-    ttk.Button(
-        btn_frame,
-        text="Open Plan",
-        command=open_plan
-    ).pack(side='right', padx=5)
-    
-    ttk.Button(
-        btn_frame,
-        text="Cancel",
-        command=selector_win.destroy
-    ).pack(side='right')
-
-
 class GolfApp:
     def __init__(self, root):
         self.backend = GolfBackend()
         self.root = root
-        root.title("Golf Handicap Tracker")
+        root.title("GALF Golf Data Terminal")
         root.geometry("400x580")  # Slightly taller to fit new button
 
         # === yardbook INITIALIZATION ===
@@ -2917,7 +2832,7 @@ class GolfApp:
         self.main_frame = ttk.Frame(root, padding=20)
         self.main_frame.pack(fill='both', expand=True)
 
-        ttk.Label(self.main_frame, text="⛳ Golf Tracker",
+        ttk.Label(self.main_frame, text="⛳ Golf Stats",
                   style="Title.TLabel").pack(pady=(0, 20))
 
         self.info_frame = ttk.LabelFrame(self.main_frame, text="Your Stats", padding=10)
@@ -2941,13 +2856,12 @@ class GolfApp:
 
         buttons = [
             ("🏌️ Log a Round", self.open_log_round_page),
-            ("📋 View Scorecards", self.open_scorecards_page),
             ("🏌️ Manage Courses", self.open_manage_courses),
             ("➕ Add New Course", lambda: self.open_course_window()),
-            ("🏌️ Club Distances", self.open_club_distances),
-            ("📍 Yardbook", self.open_yardbook),  # NEW: yardbook button
-            ("📝 Hole Plan", self.open_hole_plan),  # NEW: Hole Plan button
+            ("📍 Yardbook", self.open_yardbook), 
             ("📖 Rulebook", self.open_rulebook),
+            ("🏌️ Club Distances", self.open_club_distances),
+            ("📋 View Scorecards", self.open_scorecards_page),
             ("📊 Statistics", self.open_statistics),
         ]
 
@@ -3075,16 +2989,6 @@ class GolfApp:
                 "• Calculate accurate yardages\n"
                 "• Draw fairway and hazard overlays"
             )
-
-    # === Hole Plan: Strategy planning launcher ===
-    def open_hole_plan(self):
-        """Open the Hole Plan feature for strategy planning."""
-        open_hole_plan(
-            parent=self.root,
-            backend=self.backend,
-            courses_file=COURSES_FILE,
-            yardbook_integration=self.yardbook
-        )
 
     def open_course_window(self, course=None):
         self.editing_course = course
@@ -3319,6 +3223,10 @@ class GolfApp:
 
         ttk.Label(frame, text="Log New Round", style="Title.TLabel").grid(row=0, column=0, columnspan=2, pady=(0, 15))
 
+        # Load user preferences for course and tee
+        favorite_courses = self.backend.get_favorite_courses()
+        preferred_tee = self.backend.get_preferred_tee_color()
+
         # Club (facility) selection - FIRST
         ttk.Label(frame, text="Club:").grid(row=1, column=0, sticky='e', pady=5)
         clubs = sorted(list(set(c.get("club", "") for c in courses if c.get("club"))))
@@ -3339,6 +3247,8 @@ class GolfApp:
 
         ttk.Label(frame, text="Tee Box:").grid(row=3, column=0, sticky='e', pady=5)
         self.tee_var = tk.StringVar()
+        # Store preferred tee for later use in update_course_info
+        self._preferred_tee_color = preferred_tee
         self.tee_menu = ttk.Combobox(frame, textvariable=self.tee_var, state='readonly', width=25)
         self.tee_menu.grid(row=3, column=1, pady=5)
         self.tee_menu.bind("<<ComboboxSelected>>", self.update_course_info)
@@ -3403,8 +3313,8 @@ class GolfApp:
 
         ttk.Button(frame, text="Start Scoring →", command=self.start_round_input).grid(row=16, column=0, columnspan=2, pady=20)
         
-        # Initialize course list AFTER all widgets are created
-        self.on_club_facility_selected()
+        # Initialize course list with user preferences
+        self._init_log_round_with_preferences(favorite_courses)
     
     def on_club_facility_selected(self, event=None):
         """Filter courses based on selected club"""
@@ -3426,6 +3336,35 @@ class GolfApp:
         else:
             self.course_var.set("")
     
+    def _init_log_round_with_preferences(self, favorite_courses: List[str]):
+        """Initialize log round page with user's preferred course and tee."""
+        courses = self.backend.get_courses()
+        course_names = [c["name"] for c in courses]
+        
+        # Try to select a favorite course
+        selected_course = None
+        for fav in favorite_courses:
+            if fav in course_names:
+                selected_course = fav
+                break
+        
+        if selected_course:
+            # Find which club this course belongs to
+            course = self.backend.get_course_by_name(selected_course)
+            if course and course.get("club"):
+                self.club_facility_var.set(course["club"])
+            
+            # Populate course list
+            self.on_club_facility_selected()
+            
+            # Set the selected course
+            if selected_course in self.course_menu['values']:
+                self.course_var.set(selected_course)
+                self.update_course_info()
+        else:
+            # No favorite course, just use defaults
+            self.on_club_facility_selected()
+    
     def update_mode_description(self, *args):
         """Update the mode description label based on selection."""
         mode = self.entry_mode_var.get()
@@ -3442,8 +3381,15 @@ class GolfApp:
 
         colors = [b["color"] for b in course["tee_boxes"]]
         self.tee_menu.config(values=colors)
+        
+        # Try to use preferred tee color if available
+        preferred_tee = getattr(self, '_preferred_tee_color', None)
         if self.tee_var.get() not in colors:
-            self.tee_var.set(colors[0] if colors else "")
+            # Current tee not valid for this course
+            if preferred_tee and preferred_tee in colors:
+                self.tee_var.set(preferred_tee)
+            else:
+                self.tee_var.set(colors[0] if colors else "")
 
         tee_color = self.tee_var.get()
         if not tee_color:
