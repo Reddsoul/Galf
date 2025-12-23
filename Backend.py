@@ -535,28 +535,63 @@ class HoleMapFeatures:
     green_back: GeoPoint = field(default_factory=GeoPoint)
     targets: List[Target] = field(default_factory=list)
     hazards: List[Hazard] = field(default_factory=list)
-    polygons: Dict[str, Polygon] = field(default_factory=dict)
+    # CHANGED: Now stores list of polygons per type to support multiple bunkers, water hazards, etc.
+    polygons: Dict[str, List[Polygon]] = field(default_factory=dict)
     slope_arrows: List[Dict] = field(default_factory=list)
-    aim_breaks: List[GeoPoint] = field(default_factory=list)  # NEW: Segmented aim line break points
+    aim_breaks: List[GeoPoint] = field(default_factory=list)
     notes: str = ""
     last_modified: str = ""
     
     def __post_init__(self):
-        default_polygon_types = ["fairway", "green", "water", "bunker", "native"]
+        # CHANGED: Removed "native" from default polygon types
+        default_polygon_types = ["fairway", "green", "water", "bunker"]
         for ptype in default_polygon_types:
             if ptype not in self.polygons:
-                self.polygons[ptype] = Polygon()
+                self.polygons[ptype] = []
+    
+    def add_polygon(self, ptype: str, polygon: Polygon):
+        """Add a polygon to the specified type."""
+        if ptype not in self.polygons:
+            self.polygons[ptype] = []
+        self.polygons[ptype].append(polygon)
+    
+    def get_polygons(self, ptype: str) -> List[Polygon]:
+        """Get all polygons of a specific type."""
+        return self.polygons.get(ptype, [])
+    
+    def get_all_valid_polygons(self) -> List[Tuple[str, int, Polygon]]:
+        """Get all valid polygons with their type and index."""
+        result = []
+        for ptype, poly_list in self.polygons.items():
+            for idx, poly in enumerate(poly_list):
+                if poly.is_valid():
+                    result.append((ptype, idx, poly))
+        return result
+    
+    def remove_polygon(self, ptype: str, index: int) -> bool:
+        """Remove a polygon by type and index."""
+        if ptype in self.polygons and 0 <= index < len(self.polygons[ptype]):
+            self.polygons[ptype].pop(index)
+            return True
+        return False
     
     def to_dict(self) -> Dict:
+        # CHANGED: Serialize list of polygons per type
+        polygons_dict = {}
+        for ptype, poly_list in self.polygons.items():
+            valid_polys = [p.to_list() for p in poly_list if p.is_valid()]
+            if valid_polys:
+                polygons_dict[ptype] = valid_polys
+        
         return {
             "tee": self.tee.to_dict(),
             "green_front": self.green_front.to_dict(),
             "green_back": self.green_back.to_dict(),
             "targets": [t.to_dict() for t in self.targets],
             "hazards": [h.to_dict() for h in self.hazards],
-            "polygons": {k: v.to_list() for k, v in self.polygons.items() if v.is_valid()},
+            "polygons": polygons_dict,
             "slope_arrows": self.slope_arrows,
-            "aim_breaks": [bp.to_dict() for bp in self.aim_breaks],  # NEW: Serialize aim breaks
+            "aim_breaks": [bp.to_dict() for bp in self.aim_breaks],
             "notes": self.notes,
             "last_modified": self.last_modified
         }
@@ -580,12 +615,22 @@ class HoleMapFeatures:
         for h_data in data.get("hazards", []):
             features.hazards.append(Hazard.from_dict(h_data))
         
-        for ptype, vertices in data.get("polygons", {}).items():
-            features.polygons[ptype] = Polygon.from_list(vertices)
+        # CHANGED: Load polygons - handle both old format (single polygon) and new format (list)
+        for ptype, poly_data in data.get("polygons", {}).items():
+            if ptype not in features.polygons:
+                features.polygons[ptype] = []
+            
+            # Check if it's old format (list of vertex dicts) or new format (list of polygon lists)
+            if poly_data and isinstance(poly_data[0], dict):
+                # Old format: single polygon stored directly as vertex list
+                features.polygons[ptype].append(Polygon.from_list(poly_data))
+            else:
+                # New format: list of polygon vertex lists
+                for vertices in poly_data:
+                    features.polygons[ptype].append(Polygon.from_list(vertices))
         
         features.slope_arrows = data.get("slope_arrows", [])
         
-        # NEW: Load aim_breaks with backward compatibility (defaults to empty list)
         for bp_data in data.get("aim_breaks", []):
             features.aim_breaks.append(GeoPoint.from_dict(bp_data))
         
@@ -598,10 +643,10 @@ class HoleMapFeatures:
         self.green_back = GeoPoint()
         self.targets = []
         self.hazards = []
-        for poly in self.polygons.values():
-            poly.clear()
+        for ptype in self.polygons:
+            self.polygons[ptype] = []
         self.slope_arrows = []
-        self.aim_breaks = []  # NEW: Reset aim breaks
+        self.aim_breaks = []
         self.notes = ""
     
     def has_data(self) -> bool:
@@ -610,9 +655,10 @@ class HoleMapFeatures:
             return True
         if self.targets or self.hazards:
             return True
-        for poly in self.polygons.values():
-            if poly.is_valid():
-                return True
+        for poly_list in self.polygons.values():
+            for poly in poly_list:
+                if poly.is_valid():
+                    return True
         return False
 
 
@@ -748,7 +794,6 @@ POLYGON_STYLES = {
     "green": {"fill_color": "#006400", "outline_color": "#004000", "fill_opacity": 0.5, "label": "Green"},
     "water": {"fill_color": "#1E90FF", "outline_color": "#0000CD", "fill_opacity": 0.4, "label": "Water"},
     "bunker": {"fill_color": "#F4E4C1", "outline_color": "#C4A961", "fill_opacity": 0.5, "label": "Bunker"},
-    "native": {"fill_color": "#8B4513", "outline_color": "#654321", "fill_opacity": 0.3, "label": "Native/Waste"}
 }
 
 MARKER_STYLES = {
@@ -2113,11 +2158,14 @@ class GolfBackend:
             "putts": {"par3": [], "par4": [], "par5": [], "overall": []},
             "strokes_to_green": {"par3": [], "par4": [], "par5": []},
             "three_putt_count": 0,
+            "two_putt_count": 0,
             "one_putt_count": 0,
             "total_holes_with_putts": 0,
             "club_usage": {},
             "scramble_opportunities": 0,
             "scramble_successes": 0,
+            "fir_attempts": 0,
+            "fir_hits": 0,
         }
         
         for rd in self.rounds:
@@ -2167,8 +2215,17 @@ class GolfBackend:
                     
                     if putts >= 3:
                         stats["three_putt_count"] += 1
-                    if putts == 1:
+                    elif putts == 2:
+                        stats["two_putt_count"] += 1
+                    elif putts == 1:
                         stats["one_putt_count"] += 1
+                
+                # FIR tracking (fairway in regulation for par 4/5)
+                fir = hole_data.get("fir")
+                if fir is not None and par in [4, 5]:
+                    stats["fir_attempts"] += 1
+                    if fir:
+                        stats["fir_hits"] += 1
                 
                 # Club usage tracking (exclude putter from ranking)
                 for club in clubs_used:
@@ -2189,7 +2246,9 @@ class GolfBackend:
             "avg_strokes_to_green_par4": self._calc_average(stats["strokes_to_green"]["par4"]),
             "avg_strokes_to_green_par5": self._calc_average(stats["strokes_to_green"]["par5"]),
             "three_putt_rate": round(stats["three_putt_count"] / stats["total_holes_with_putts"] * 100, 1) if stats["total_holes_with_putts"] > 0 else None,
+            "two_putt_rate": round(stats["two_putt_count"] / stats["total_holes_with_putts"] * 100, 1) if stats["total_holes_with_putts"] > 0 else None,
             "one_putt_rate": round(stats["one_putt_count"] / stats["total_holes_with_putts"] * 100, 1) if stats["total_holes_with_putts"] > 0 else None,
+            "fir_overall": round(stats["fir_hits"] / stats["fir_attempts"] * 100, 1) if stats["fir_attempts"] > 0 else None,
             "scramble_rate": round(stats["scramble_successes"] / stats["scramble_opportunities"] * 100, 1) if stats["scramble_opportunities"] > 0 else None,
             "club_usage": stats["club_usage"],
             "total_holes_tracked": stats["total_holes_with_putts"],

@@ -1,297 +1,140 @@
-# **Galf — Golf Handicap Tracker & Yardbook**
 
-### **User Guide**
+![Galf Logo](Galf.png)
 
-Galf is a desktop golf companion designed to help you **manage courses**, **log rounds**, **track your handicap**, and build a **digital yardage / greenbook** with on-map distances and planning tools.
+# ⛳ Galf
 
-This guide explains **what each part of the app does and how to use it** **.**
+**Galf** is a desktop golf companion app focused on ***playing smarter* , not just tracking scores. It combines a** **yardbook** / **greenbook** ,*****scorecard** ,** ***club distances** , and** **stats** into a single, clean, Apple‑HIG‑inspired Tkinter application.
 
----
-
-## **Getting Started**
-
-When you open Galf, you’ll see the **Main Menu** with buttons for:
-
-* Manage Courses
-* Log Round
-* Scorecards
-* Club Distances
-* Statistics
-* Rulebook
-* Greenbook / Yardbook
-
-You can use the app in any order, but most users follow this flow:
-
-1. Set up courses
-2. Add club distances
-3. Log rounds
-4. Use the Yardbook while planning or playing
+This is not a social app, simulator, or gimmicky range toy. Galf is built for golfers who care about **course management, repeatability, and decision‑making** .
 
 ---
 
-## **1. Manage Courses**
+## ✨ Core Features
 
-This is where everything starts.
+### 🗺️ Yardbook / Course Mapping
 
-### **What you can do**
+* Per‑hole visual yardbook
+* Tee, green front/back, hazards, targets, and custom pins
+* Distance calculations rendered **directly on the map**
+* Designed to replace traditional hole‑plan sketches
 
-* Add new golf courses
-* Set the number of holes (9 or 18)
-* Assign par for each hole
-* Add multiple tee boxes (by color)
-* Mark favorite courses
-* Open the Yardbook for a course
+### 📝 Log a Round
 
-### **How to use**
+* Track scores hole‑by‑hole
+* Automatically applies:
+  * Preferred courses
+  * Preferred tee box color
+* Clean flow focused on speed and accuracy
 
-1. Open **Manage Courses**
-2. Click **Add Course**
-3. Enter the course name and number of holes
-4. Set the par for each hole
-5. Add tee box colors (e.g., Blue, White, Red)
-6. Save
+### 📊 Stats & Analysis
 
-### **Tips**
+* Score trends relative to par
+* Consistent ranking logic (par‑adjusted, not raw score)
+* Built to surface *patterns* , not noise
 
-* Mark courses you play often as **Favorites**
-* Favorites show up first when logging rounds
-* Tee box colors are reused across the app
+### 🧭 Club Distances
 
----
+* Maintain personal carry distances
+* Reference distances while logging or planning shots
 
-## **2. Log a Round**
+### 📚 Rulebook
 
-Use this after a round to record your score.
+* Integrated golf rule reference
+* Designed for quick lookup during play
 
-### **Two entry modes**
+### 🧾 Scorecard Viewer
 
-* **Quick Entry** – fast score-only entry
-* **Detailed Entry** – more data per hole
-
-### **What happens automatically**
-
-* Your favorite courses appear first
-* Your preferred tee box is auto-selected when available
-* The app knows if the course is 9 or 18 holes
-
-### **How to log a round**
-
-1. Open **Log Round**
-2. Choose:
-   * Course
-   * Tee box
-   * 9 or 18 holes
-3. Pick **Quick** or **Detailed**
-4. Enter your scores
-5. Save
-
-### **Why this matters**
-
-All handicap calculations, rankings, and stats come from logged rounds.
+* Review historical rounds
+* Compare performance across courses and conditions
 
 ---
 
-## **3. Scorecards**
+## 🧠 Design Philosophy (KISS)
 
-This is your round history.
+* **One primary window**
+* Tab‑based navigation (mobile‑app feel)
+* Large spacing, clear hierarchy, minimal clutter
+* Built with Apple Human Interface Guidelines in mind
 
-### **What you can see**
-
-* All past rounds
-* Scores ranked correctly by **score relative to par**
-* Individual round details
-* Printable scorecards (PDF)
-
-### **Important detail**
-
-Scores are ranked **fairly**, even across different course lengths.
-
-A great round on a short course won’t incorrectly outrank a solid round on a long course.
+Galf prioritizes ****clarity over configuration** and** **signal over features** .
 
 ---
 
-## **4. Handicap & Scoring**
+## 🛠️ Tech Stack
 
-You don’t need to calculate anything manually.
-
-### **The app automatically**
-
-* Computes score differentials
-* Tracks handicap index
-* Adjusts for 9-hole rounds
-* Keeps rankings accurate over time
-
-### **Where to view it**
-
-* Scorecards
-* Statistics page
+* **Language:** Python 3
+* **UI:** Tkinter
+* **Data:** pandas, numpy
+* **Mapping:** tkintermapview (where available)
+* **Architecture:**
+  * `Frontend.py` — UI, views, interaction logic
+  * `Backend.py` — data models, calculations, persistence
 
 ---
 
-## **5. Club Distances**
+## 📁 Project Structure
 
-This helps power the Yardbook.
-
-### **What to do**
-
-* Add each club in your bag
-* Enter your typical carry distance
-
-### **Why it matters**
-
-* Distance rings on the map match **your actual clubs**
-* Helps with shot planning inside the Yardbook
+```
+Galf/
+├── Frontend.py        # UI, views, navigation
+├── Backend.py         # Data logic, stats, persistence
+├── Galf.png           # App / README logo
+├── data/              # User data (courses, rounds, prefs)
+└── README.md
+```
 
 ---
 
-## **6. Statistics**
+## 🚀 Getting Started
 
-See how your game is trending.
+### 1. Clone the repo
 
-### **What you can view**
+```bash
+git clone https://github.com/Reddsoul/galf.git
+cd galf
+```
 
-* Round averages
-* Handicap history
-* Performance trends
-* Aggregated stats across all rounds
+### 2. Install dependencies
 
-This page updates automatically as you log more rounds.
+```bash
+pip install pandas numpy tkintermapview ... theres alot
+```
 
----
+*(Tkinter is included with most Python installs.)*
 
-## **7. Rulebook**
+### 3. Run the app
 
-A built-in Rules of Golf reference.
-
-### **Features**
-
-* Browse rules by section
-* Expand and collapse chapters
-* Search by keyword
-* Bookmark rules
-* Add notes
-
-### **Best use**
-
-Great for quick rulings or post-round rule checks without leaving the app.
+```bash
+python Frontend.py
+```
 
 ---
 
-# **8. Yardbook / Greenbook (Map Feature)**
+## ⚠️ Notes & Limitations
 
-This is where Galf really shines.
-
-The Yardbook lets you build a **digital yardage book** for each hole using a satellite map.
-
----
-
-## **What You Can Add to a Hole**
-
-### **Markers**
-
-* Tee
-* Green Front
-* Green Back
-* Targets (layup spots, trees, landing zones)
-* Hazards (water, bunkers, OB, etc.)
-
-### **Polygons**
-
-* Fairways
-* Greens
-* Bunkers
-* Water hazards
-
-### **Aim Lines**
-
-* Visual shot planning lines
-* Lines can break and rotate
-* Distance is shown for each segment
-
-Aim line rules:
-
-* Par 3 → no breaks
-* Par 4 → 1 break
-* Par 5 → 2 breaks
+* Mapping features gracefully degrade if optional dependencies are missing
+* Designed for desktop use (macOS / Windows / Linux)
+* No cloud sync — data stays local by design
 
 ---
 
-## **On-Map Distances**
+## 🧭 Roadmap (High‑Level)
 
-Distances appear **directly on the map**, not in a sidebar.
-
-Examples:
-
-* **F 152y** → Front of green
-* **B 168y** → Back of green
-* **T1 240y** → Target distance
-* **W 205y** → Water hazard
-
-Everything updates live as you move markers.
+* Improved yardbook pin workflows
+* Smarter default hole positioning when adding new courses
+* Enhanced stats views (dispersion, consistency)
+* 
 
 ---
 
-## **Using the Yardbook**
+## 🤝 Philosophy
 
-### **Basic workflow**
+> *Golf is a game of decisions made under uncertainty.*
 
-1. Open a course
-2. Select a hole
-3. Place:
-   * Tee
-   * Green front & back
-4. Add targets and hazards
-5. Draw fairways or bunkers if desired
-6. Turn on distance rings and aim lines
-7. Save
-
-### **Navigation**
-
-* Move hole-to-hole using Previous / Next
-* Each hole saves independently
-
-### **Distance Rings**
-
-* **Rings reflect your ****actual club distances**
-* Helps visualize carry zones and layups
+Galf exists to reduce that uncertainty — not by telling you what to do, but by giving you **better information at the moment it matters** with a 0 trust privacy aproach.
 
 ---
 
-## **Saving & Clearing**
+## 📄 License
 
-* **Save** stores everything for that hole
-* **Clear All** removes everything on the current hole only
-
-Your data stays saved for future sessions.
-
----
-
-## **Best Practices**
-
-* Start by mapping just tees and greens
-* Add hazards and targets later
-* Use aim lines for strategy, not perfection
-* Build your Yardbook gradually over time
-
----
-
-## **Who This App Is For**
-
-* Golfers who want accurate handicap tracking
-* Players who like planning shots before a round
-* People who want an offline, desktop golf tool
-* Anyone tired of cluttered golf apps
-
----
-
-## **Final Notes**
-
-Galf is designed to feel:
-
-* Fast
-* Private
-* Practical
-* Distraction-free
-* Focused on real golf decisions
-
-If you treat it like a notebook you improve over time, it becomes extremely powerful.
+MIT License
