@@ -3,9 +3,9 @@
 
 # ⛳ Galf
 
-**Galf** is a desktop golf companion app focused on ***playing smarter* , not just tracking scores. It combines a** **yardbook** / **greenbook** ,*****scorecard** ,** ***club distances** , and** **stats** into a single, clean, Apple‑HIG‑inspired Tkinter application.
+**Galf** is a desktop golf companion app focused on ***playing smarter* , not just tracking scores. It combines a** **yardbook** / **greenbook** ,*****scorecard** ,** ***club distances** , and** **stats** into a single, clean application.
 
-This is not a social app, simulator, or gimmicky range toy. Galf is built for golfers who care about **course management, repeatability, and decision‑making** .
+This is not a social app, simulator, or gimmicky range toy. Galf is built for golfers who care about ** Privacy, course management, and decision‑making** .
 
 ---
 
